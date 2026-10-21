@@ -1,0 +1,71 @@
+name: Publish GitHub package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to publish to GitHub Packages
+        required: true
+        default: v0.1.2
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: github-package-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      INKFORM_RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: https://npm.pkg.github.com
+      - name: Test the released launcher
+        run: npm test
+      - name: Prepare the GitHub registry namespace
+        run: |
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+          const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (process.env.INKFORM_RELEASE_TAG !== `v${pkg.version}`) {
+            throw new Error('The selected release tag does not match the package version.');
+          }
+          const owner = process.env.GITHUB_REPOSITORY_OWNER.toLowerCase();
+          if (!/^[a-z0-9][a-z0-9-]*$/.test(owner)) throw new Error('Invalid package owner.');
+          pkg.name = `@${owner}/inkform`;
+          pkg.repository = { type: 'git', url: `git+https://github.com/${process.env.GITHUB_REPOSITORY}.git` };
+          pkg.publishConfig = { ...pkg.publishConfig, registry: 'https://npm.pkg.github.com', access: 'public' };
+          writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          appendFileSync(process.env.GITHUB_ENV, `INKFORM_PACKAGE_NAME=${pkg.name}\nINKFORM_PACKAGE_VERSION=${pkg.version}\n`);
+          JS
+      - name: Pack and inspect public contents
+        run: |
+          mkdir -p "$RUNNER_TEMP/inkform-github"
+          npm pack --pack-destination "$RUNNER_TEMP/inkform-github"
+          python3 scripts/check_public_release.py "$RUNNER_TEMP"/inkform-github/*.tgz
+      - name: Publish the linked package
+        run: npm publish "$RUNNER_TEMP"/inkform-github/*.tgz --registry=https://npm.pkg.github.com --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify registry metadata
+        run: npm view "$INKFORM_PACKAGE_NAME@$INKFORM_PACKAGE_VERSION" name version repository --registry=https://npm.pkg.github.com --json
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Report repository association and visibility
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "users/$GITHUB_REPOSITORY_OWNER/packages/npm/inkform" \
+            --jq '{name, visibility, html_url, repository: .repository.full_name}'

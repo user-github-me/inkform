@@ -1,0 +1,24 @@
+name: Feature request
+description: Suggest an improvement to the engine or agent workflow.
+title: "Feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Explain what you need to do and where the current behavior falls short.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the result a user should see. Synthetic examples are welcome; do not attach personal handwriting or documents.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Optional approaches or workarounds and their limits.

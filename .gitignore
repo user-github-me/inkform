@@ -1,0 +1,21 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+/build/
+/dist/
+/my writtings/
+/output/
+/profiles/
+/private/
+/node_modules/
+/.npm-cache/
+*.tgz
+/.env
+/.env.*
+/.npmrc
+/PERSONAL_HANDWRITING_SKILL_BLUEPRINT.md
+*.heic
+*.HEIC

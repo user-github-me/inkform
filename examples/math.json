@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "document_id": "math-layout-demo",
+  "content_mode": "literal",
+  "blocks": [
+    {"id": "intro", "type": "paragraph", "children": [{"id": "intro-text", "type": "text", "text": "Math layout examples. These are demonstration expressions."}]},
+    {"id": "left-limit", "type": "display_math", "expression": {"type": "limit", "variable": "x", "approaches": {"type": "number", "value": "2"}, "direction": "left", "body": {"type": "function_call", "name": "f", "arguments": [{"type": "symbol", "value": "x"}]}}},
+    {"id": "right-limit", "type": "display_math", "expression": {"type": "limit", "variable": "x", "approaches": {"type": "number", "value": "2"}, "direction": "right", "body": {"type": "function_call", "name": "f", "arguments": [{"type": "symbol", "value": "x"}]}}},
+    {"id": "fraction", "type": "display_math", "expression": {"type": "fraction", "numerator": {"type": "relation", "operator": "+", "left": {"type": "superscript", "base": {"type": "symbol", "value": "x"}, "script": {"type": "number", "value": "2"}}, "right": {"type": "number", "value": "1"}}, "denominator": {"type": "number", "value": "2"}}},
+    {"id": "inline", "type": "paragraph", "children": [{"id": "inline-text", "type": "text", "text": "A root inside a sentence: "}, {"id": "inline-math", "type": "inline_math", "expression": {"type": "root", "body": {"type": "number", "value": "4"}}}, {"id": "inline-ending", "type": "text", "text": "."}]}
+  ],
+  "unresolved_inputs": []
+}

@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inkform"
+version = "0.1.1"
+description = "Private handwriting profiles and fresh vector ink for printable documents"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = [
+  "Pillow>=10.4", "pillow-heif>=0.20", "numpy>=1.26", "scipy>=1.12",
+  "scikit-image>=0.24", "jsonschema>=4.23", "regex>=2024.9",
+  "reportlab>=4.2", "pypdf>=5", "pypdfium2>=4.30"
+]
+
+[project.urls]
+Homepage = "https://user-github-me.github.io/inkform/"
+Repository = "https://github.com/user-github-me/inkform"
+Issues = "https://github.com/user-github-me/inkform/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "PyYAML>=6"]
+
+[project.scripts]
+inkform = "inkform.cli:main"
+handwrite = "inkform.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+inkform = ["schemas/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

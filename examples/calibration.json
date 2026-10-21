@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "document_id": "inkform-calibration",
+  "content_mode": "literal",
+  "page": {"width_mm": 210, "height_mm": 297, "margins_mm": 20},
+  "blocks": [
+    {"id": "intro", "type": "paragraph", "children": [{"id": "intro-text", "type": "text", "text": "Inkform\nA fresh page, a familiar hand.\n\nSoft rain falls over silver rivers.\nSmall letters carry a personal rhythm.\nThe paper holds new words and clear ideas."}]},
+    {"id": "repetition", "type": "paragraph", "children": [{"id": "repetition-text", "type": "text", "text": "letter letter letter\nriver river river\nminimum, little, happy, flowing.\n\n0 1 2 3 4 5 7"}]},
+    {"id": "formula", "type": "display_math", "expression": {"type": "relation", "operator": "=", "left": {"type": "function_call", "name": "f", "arguments": [{"type": "symbol", "value": "x"}]}, "right": {"type": "number", "value": "1"}}},
+    {"id": "closing", "type": "paragraph", "children": [{"id": "closing-text", "type": "text", "text": "Same forms, fresh ink.\nprint at 100 percent on A4 paper."}]}
+  ],
+  "unresolved_inputs": []
+}

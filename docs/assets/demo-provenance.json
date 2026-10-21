@@ -1,0 +1,14 @@
+{
+  "source": "examples/synthetic-profile.json",
+  "synthetic": true,
+  "personal_sources": 0,
+  "seed": 72,
+  "representation": "centerline",
+  "pen_width_mm": 0.38,
+  "width_profile": "constant",
+  "artifacts": [
+    "handwriting.svg",
+    "mathematics.svg",
+    "inkform-synthetic-demo.pdf"
+  ]
+}

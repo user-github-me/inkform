@@ -1,0 +1,41 @@
+{
+  "name": "inkform",
+  "version": "0.1.1",
+  "description": "Learn private handwriting profiles and write printable vector PDFs, with an open agent skill",
+  "type": "module",
+  "bin": {
+    "inkform": "bin/inkform.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "bin/*.mjs",
+    "pyproject.toml",
+    "src/inkform/*.py",
+    "src/inkform/schemas/*.json",
+    "skills/inkform/SKILL.md",
+    "skills/inkform/agents/*.yaml",
+    "skills/inkform/references/*.md",
+    "skills/inkform/references/*.json",
+    "skills/inkform/scripts/*.py",
+    "examples/*.json"
+  ],
+  "scripts": {
+    "test": "node --test tests/npm/*.test.mjs",
+    "test:package": "node scripts/test-npm-package.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/user-github-me/inkform.git"
+  },
+  "homepage": "https://user-github-me.github.io/inkform/",
+  "bugs": {
+    "url": "https://github.com/user-github-me/inkform/issues"
+  },
+  "license": "MIT",
+  "keywords": ["handwriting", "pdf", "vector", "agent-skill", "local-first", "inkform"],
+  "publishConfig": {
+    "access": "public"
+  }
+}

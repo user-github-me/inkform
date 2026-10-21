@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible problem using synthetic input.
+title: "Bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use invented shapes or the bundled synthetic profile. Do not upload handwriting photographs, personal writer profiles, private PDFs, credentials, or identifying logs.
+        For a security vulnerability, follow SECURITY.md instead of posting details here.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: State the expected behavior and the actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the command and a minimal synthetic input or public example.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Inkform version
+      description: Output of inkform --version, or the commit being tested.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Python version, and installation method.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Relevant diagnostics
+      description: Optional sanitized output. Remove usernames, local source paths, and personal content.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Public report check
+      options:
+        - label: This report contains only synthetic or public project inputs and excludes personal handwriting, documents, and identifying metadata.
+          required: true

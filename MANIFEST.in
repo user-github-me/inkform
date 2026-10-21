@@ -1,0 +1,12 @@
+include README.md LICENSE CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md CHANGELOG.md pyproject.toml uv.lock
+recursive-include src/inkform *.py *.json
+recursive-include skills/inkform *.md *.py *.yaml
+recursive-include examples *.json
+recursive-include tests *.py
+recursive-include scripts *.py
+exclude PERSONAL_HANDWRITING_SKILL_BLUEPRINT.md
+prune output
+prune build
+prune private
+prune profiles
+prune my*

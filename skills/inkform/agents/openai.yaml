@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inkform"
+  short_description: "Private handwriting profiles and fresh vector PDFs"
+  default_prompt: "Use $inkform to render my text with my private handwriting profile."

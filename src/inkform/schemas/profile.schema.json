@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://inkform.local/schemas/profile.schema.json",
+  "title": "Inkform writer profile, inline geometry format",
+  "type": "object",
+  "required": ["schema_version", "profile_id", "profile_version", "scripts", "physical_scale", "pen", "metrics", "glyphs", "sources", "dynamics", "calibration_status", "synthetic"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "profile_id": {"$ref": "#/$defs/safeId"},
+    "profile_version": {"$ref": "#/$defs/safeId"},
+    "default_render_mode": {"enum": ["fresh_strokes", "clean_outline"]},
+    "scripts": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "synthetic": {"type": "boolean"},
+    "coordinate_system": {
+      "type": "object",
+      "required": ["glyph_units", "baseline_y", "y_axis", "page_units"],
+      "properties": {
+        "glyph_units": {"const": "x_height"},
+        "baseline_y": {"const": 0},
+        "y_axis": {"const": "down"},
+        "page_units": {"const": "mm"}
+      }
+    },
+    "physical_scale": {
+      "type": "object",
+      "required": ["body_x_height_mm"],
+      "properties": {"body_x_height_mm": {"type": "number", "exclusiveMinimum": 0}, "source": {"type": "string"}}
+    },
+    "pen": {
+      "type": "object",
+      "required": ["width_mm", "color"],
+      "properties": {"width_mm": {"type": "number", "exclusiveMinimum": 0}, "color": {"type": "string", "minLength": 7, "maxLength": 7, "pattern": "^#[0-9a-fA-F]{6}$"}}
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["word_gap", "line_height"],
+      "properties": {"word_gap": {"type": "number", "exclusiveMinimum": 0}, "line_height": {"type": "number", "exclusiveMinimum": 0}}
+    },
+    "dynamics": {
+      "type": "object",
+      "required": ["stroke_order", "timing", "pressure"],
+      "properties": {
+        "stroke_order": {"$ref": "#/$defs/strokeOrder"},
+        "timing": {"enum": ["unknown", "estimated", "captured", "not_applicable"]},
+        "pressure": {"enum": ["unknown", "estimated", "captured", "not_applicable"]}
+      }
+    },
+    "calibration_status": {"enum": ["unreviewed", "agent_reviewed", "user_reviewed", "pending_user_feedback"]},
+    "sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
+    "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
+    "glyphs": {"type": "array", "items": {"$ref": "#/$defs/glyph"}}
+  },
+  "$defs": {
+    "safeId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$", "not": {"pattern": "[^A-Za-z0-9._-]"}},
+    "point": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}], "minItems": 2, "maxItems": 2},
+    "reviewStatus": {"enum": ["reviewed", "proposed", "rejected"]},
+    "strokeOrder": {"enum": ["estimated", "captured", "unknown", "not_applicable"]},
+    "source": {
+      "type": "object", "required": ["source_id"],
+      "properties": {"source_id": {"$ref": "#/$defs/safeId"}, "sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-fA-F]{64}$"}}
+    },
+    "sourceRef": {
+      "type": "object", "required": ["source_id"],
+      "properties": {"source_id": {"$ref": "#/$defs/safeId"}, "observation_id": {"$ref": "#/$defs/safeId"}}
+    },
+    "observation": {
+      "type": "object", "required": ["observation_id", "source_id"],
+      "properties": {
+        "observation_id": {"$ref": "#/$defs/safeId"},
+        "source_id": {"$ref": "#/$defs/safeId"},
+        "mask_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-fA-F]{64}$"}
+      }
+    },
+    "segment": {
+      "oneOf": [
+        {"type": "object", "required": ["type", "end"], "properties": {"type": {"const": "line"}, "end": {"$ref": "#/$defs/point"}}, "additionalProperties": false},
+        {"type": "object", "required": ["type", "control1", "control2", "end"], "properties": {"type": {"const": "cubic"}, "control1": {"$ref": "#/$defs/point"}, "control2": {"$ref": "#/$defs/point"}, "end": {"$ref": "#/$defs/point"}}, "additionalProperties": false}
+      ]
+    },
+    "widthSample": {
+      "type": "object", "required": ["s", "multiplier"],
+      "properties": {"s": {"type": "number", "minimum": 0, "maximum": 1}, "multiplier": {"type": "number", "exclusiveMinimum": 0}}, "additionalProperties": false
+    },
+    "stroke": {
+      "type": "object", "required": ["start", "segments"],
+      "properties": {
+        "stroke_id": {"$ref": "#/$defs/safeId"},
+        "start": {"$ref": "#/$defs/point"},
+        "segments": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/segment"}},
+        "closed": {"type": "boolean"},
+        "width_profile": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/widthSample"}},
+        "dynamics_source": {"enum": ["estimated", "captured", "unknown", "not_applicable"]}
+      },
+      "additionalProperties": false
+    },
+    "glyph": {
+      "type": "object",
+      "required": ["glyph_id", "text", "role", "representation", "advance", "ink_bounds", "strokes", "source_refs", "label_status", "geometry_status", "reviewed_by", "stroke_order_status"],
+      "properties": {
+        "glyph_id": {"$ref": "#/$defs/safeId"},
+        "text": {"type": "string", "minLength": 1},
+        "role": {"enum": ["text", "math.variable", "math.digit", "math.operator", "math.function"]},
+        "representation": {"enum": ["centerline", "clean_outline"]},
+        "advance": {"type": "number", "exclusiveMinimum": 0},
+        "ink_bounds": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
+        "strokes": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/stroke"}},
+        "source_refs": {"type": "array", "items": {"$ref": "#/$defs/sourceRef"}},
+        "label_status": {"$ref": "#/$defs/reviewStatus"},
+        "geometry_status": {"$ref": "#/$defs/reviewStatus"},
+        "stroke_order_status": {"$ref": "#/$defs/strokeOrder"},
+        "reviewed_by": {"type": ["string", "null"], "minLength": 1},
+        "fill_rule": {"const": "evenodd"},
+        "outline_calibration": {
+          "type": "object",
+          "required": ["body_x_height_mm"],
+          "anyOf": [{"required": ["pen_width_mm"]}, {"required": ["effective_width_mm"]}],
+          "properties": {"body_x_height_mm": {"type": "number", "exclusiveMinimum": 0}, "pen_width_mm": {"type": "number", "exclusiveMinimum": 0}, "effective_width_mm": {"type": "number", "exclusiveMinimum": 0}}
+        }
+      },
+      "allOf": [
+        {"if": {"properties": {"representation": {"const": "clean_outline"}}}, "then": {"properties": {"strokes": {"items": {"required": ["closed"], "properties": {"closed": {"const": true}}}}}}}
+      ]
+    }
+  }
+}

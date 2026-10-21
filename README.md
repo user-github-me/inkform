@@ -2,7 +2,7 @@
 
 **Personal forms. Fresh ink.**
 
-[Introduction](https://user-github-me.github.io/inkform/) · [npm](https://www.npmjs.com/package/@nazifbd/inkform) · [Releases](https://github.com/user-github-me/inkform/releases) · [Contribute](https://github.com/user-github-me/inkform/blob/main/CONTRIBUTING.md)
+[Introduction](https://user-github-me.github.io/inkform/) · [npm](https://www.npmjs.com/package/@nazifbd/inkform) · [GitHub Packages](https://github.com/user-github-me/inkform/pkgs/npm/inkform) · [Releases](https://github.com/user-github-me/inkform/releases) · [Contribute](https://github.com/user-github-me/inkform/blob/main/CONTRIBUTING.md)
 
 Inkform is an open-source Python engine and agent skill for learning reusable private handwriting profiles and producing printable vector PDFs. It fits the writer's own reviewed forms, preserves genuine variants, and keeps text and mathematical roles separate.
 
@@ -26,6 +26,8 @@ inkform skill install
 You can also use `npx @nazifbd/inkform setup` and `npx @nazifbd/inkform skill install`. The installer defaults to `~/.agents/skills/inkform`; use `--path` for your agent's skill directory. It preserves an existing installation unless you explicitly request replacement. See [installation details](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/installation.md).
 
 The npm package contains the Python engine and skill. It is a launcher and installer, not a browser handwriting model. The Python environment is prepared only by the explicit `setup` command.
+
+The repository also publishes a linked [GitHub Packages mirror](https://github.com/user-github-me/inkform/pkgs/npm/inkform), named `@user-github-me/inkform`. GitHub's npm registry requires [GitHub registry authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-npm-registry#authenticating-to-github-packages), including for public packages. Once configured, install it with `npm install -g @user-github-me/inkform --registry=https://npm.pkg.github.com`. Both packages provide the same `inkform` command and handwriting engine.
 
 ## Run from source
 

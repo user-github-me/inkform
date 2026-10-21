@@ -6,9 +6,11 @@
 
 Inkform is an open-source Python engine and agent skill for learning reusable private handwriting profiles and producing printable vector PDFs. It fits the writer's own reviewed forms, preserves genuine variants, and keeps text and mathematical roles separate.
 
-This is a working **0.1 implementation**, with a profile importer, reviewed vector geometry, semantic layout, a command-line interface, and actual PDF checks. Personal resemblance and print quality still need calibration. It is not a fully automatic photo-to-handwriting model.
+This is a working **0.2 implementation**, with a profile importer, reviewed vector geometry, semantic layout, a command-line interface, and actual PDF checks. Personal resemblance and print quality still need calibration. It is not a fully automatic photo-to-handwriting model.
 
 Inkform includes sample-first training, portable reviewed observations, smooth cubic outline refinement, and 300 dpi previews. A writer can choose `default_render_mode: clean_outline` to retain fuller, sample-derived forms. An explicit `--mode` overrides that preference. The PDF itself remains vector at every preview resolution.
+
+Repeated letters and math symbols now receive bounded variation, including the length of arrows. The profile learns the range from distinct reviewed examples where available; sparse evidence uses a conservative estimate. Reviewed correction habits can add crossed-out word restarts at a rate learned from sample passages, using the writer's own strike or scribble geometry. Writers with no observed correction habit receive none.
 
 ## Install with npm
 
@@ -62,6 +64,8 @@ Training learns a private library of the writer's own fitted curves and variants
 
 Once calibrated, the profile is reused for new documents. Additional samples improve it through immutable versions. If a requested symbol is missing, the workflow uses more evidence from the supplied pages or requests a targeted sample. It does not fill the gap with generic handwriting. Resemblance, spacing, and printed appearance are evaluated separately; export validity alone is not a handwriting-match score.
 
+Include multiple occurrences of frequent letters and symbols, ordinary word spacing, and representative passages containing any corrections. The agent reviews the forms, word boxes, and correction counts separately. This distinguishes the writer's actual range from one repeated crop or a collection containing only their messiest words. See [observation evidence](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/observations.md) for the manifest format.
+
 ## Personal profiles
 
 ```sh
@@ -92,18 +96,19 @@ inkform compare --reference build/baseline.pdf \
   --candidate build/personal.pdf --output build/comparison
 ```
 
-Documents contain paragraphs with typed text/inline-math runs and display-math blocks. Supported mathematics includes numbers, symbols, rows, relations, function calls, fractions, square roots, superscripts, subscripts, and limits with explicit `left`, `right`, or `both` direction. Coverage depends on the selected profile; a supported math structure does not imply its symbols have been learned. Oversized indivisible words/expressions produce an actionable overflow error. Prose wraps and paginates without compressing lines.
+Documents contain paragraphs with typed text, inline-math, or correction runs and display-math blocks. Supported mathematics includes numbers, symbols, rows, relations, function calls, fractions, square roots, superscripts, subscripts, and limits with explicit `left`, `right`, or `both` direction. Coverage depends on the selected profile; a supported math structure does not imply its symbols have been learned. Oversized indivisible words/expressions produce an actionable overflow error. Prose wraps and paginates without compressing lines.
 
-The renderer preserves supplied content; it does not solve exercises or verify their mathematical truth. An agent performs those tasks before rendering. Missing graphs belong in `unresolved_inputs`, which is retained and reported in a partial deliverable. Literal text is preserved exactly in the semantic and text sidecars; line wrapping and whitespace are physical layout decisions.
+The renderer preserves supplied content; it does not solve exercises or verify their mathematical truth. An agent performs those tasks before rendering. Missing graphs belong in `unresolved_inputs`, which is retained and reported in a partial deliverable. Literal text is preserved exactly in the semantic and text sidecars; line wrapping and whitespace are physical layout decisions. Sampled cross-outs duplicate a word before its intact version, preserving the intended wording. Explicit correction runs retain supplied deleted text in the semantic document and use the replacement in the plain-text sidecar. Set `"handwriting": {"corrections": "none"}` to disable sampled cross-outs.
 
 See the [agent skill](https://github.com/user-github-me/inkform/blob/main/skills/inkform/SKILL.md), [profile contract](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/profile-format.md), [document contract](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/documents.md), and [rendering and validation notes](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/rendering.md).
 
 ## Current limits
 
-- Fresh mode uses reviewed centerlines, with rounded caps and joins, optional smooth width profiles, small coherent word variation, and deterministic variant selection. Photo-derived paths do not recover real pen pressure, timing, or order.
+- Both modes use deterministic variant selection and bounded per-occurrence variation. Repeated-form measurements inform width and height; estimated variation remains labeled. Fresh mode also supports rounded caps and joins and smooth width profiles. Photo-derived paths do not recover real pen pressure, timing, or order.
+- Cross-outs need a reviewed correction mark. Automatic placement additionally needs a correction rate counted from representative sample passages; importing photographs or isolated marks alone does not establish that habit. Corrections are text restarts, not generated wrong answers.
 - Clean outlines preserve the observed ink shape and can be the writer's default. Their thickness is baked into their geometry. Uncalibrated size changes, scripts, and scalable outline primitives are rejected.
 - Outline refinement fits continuous cubic curves with bounded movement while preserving detached marks, holes, containment, and ink area. New candidates need geometric review; old profile snapshots remain available. Changing the PNG preview DPI does not smooth the PDF's geometry.
-- Unrefined centerlines can remain angular. Connected cursive, kerning learned from whole words, automatic page/perspective measurement, universal OCR segmentation, advanced math, and tablet capture are future work.
+- Unrefined centerlines can remain angular. Reviewed consecutive word boxes can inform word-gap variation; connected cursive, learned within-word kerning, automatic page/perspective measurement, universal OCR segmentation, advanced math, and tablet capture are future work.
 - Actual PDF parsing, exact page size, vector paths, image absence, safe bounds, and every-page rasterization are checked. Similarity, correct transcription/answers, and printed readability require review. There is no invented handwriting-match score.
 - Coverage is specific to each writer's reviewed samples. Missing forms fail coverage; Inkform never silently inserts a font.
 

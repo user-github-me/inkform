@@ -36,10 +36,11 @@ profile mapping. With a base profile, it merges into a new version while
 preserving unrelated records and calibration. Training normally calls it and
 handles version persistence.
 
-Each entry is one Unicode character with one explicit role: `text`,
-`math.variable`, `math.digit`, `math.operator`, or `math.function`. Multiple
-entries can provide variants. IDs must be unique within the manifest. There is
-no automatic text-to-mathematics role substitution.
+Each letter or symbol entry is one Unicode character with one explicit role:
+`text`, `math.variable`, `math.digit`, `math.operator`, or `math.function`.
+Correction marks instead use `role: "mark.correction"` and `text: "crossout"`.
+Multiple entries can provide variants. IDs must be unique within the manifest.
+There is no automatic text-to-mathematics role substitution.
 
 This synthetic example assumes an inspected letter inside a 300 × 200 image:
 
@@ -65,6 +66,86 @@ This synthetic example assumes an inspected letter inside a 300 × 200 image:
 `label_status` is `proposed` by default, or `reviewed` / `rejected`. A reviewed
 label requires a nonempty `reviewed_by`. This approves the character label
 only; newly reconstructed geometry still requires a separate review.
+
+## Repeated forms, word spacing, and correction habits
+
+Use distinct independently written occurrences to capture a form's range.
+The profile learns width and height spread when at least two reviewed source
+occurrences of the same role and character are available. Aliases and two
+representations of one crop remain one observation; they do not add evidence.
+
+Optional top-level `style_observations` hold reviewed layout or frequency
+evidence. These rows refer to original image bytes, including an exported page
+image when the original intake was a PDF. Portable `source_path` does not itself
+decode a PDF. Coordinates use the oriented image convention above, and
+`page_index` and `word_index` are zero-based.
+
+Every explicitly reviewed style row requires `source_path`, its exact
+`source_sha256`, and a named `reviewed_by`. Compute the hash from the unmodified
+image file, for example with
+`hashlib.sha256(Path("samples/page.png").read_bytes()).hexdigest()` in Python.
+Changing the source requires renewed review.
+
+For word spacing, record each consecutive word box with these fields:
+
+```json
+{
+  "id": "page-0-line-1-word-0",
+  "kind": "word",
+  "source_path": "samples/page.png",
+  "source_sha256": "REPLACE_WITH_ACTUAL_IMAGE_SHA256",
+  "page_index": 0,
+  "line_id": "line-1",
+  "word_index": 0,
+  "bbox_xywh": [40, 20, 140, 45],
+  "xheight_px": 30,
+  "label_status": "reviewed",
+  "layout_status": "reviewed",
+  "reviewed_by": "Agent review against original page"
+}
+```
+
+Add the following word with its own ID, `word_index: 1`, and inspected box.
+The gap comes from consecutive words on the same line, normalized by x-height;
+isolated glyph advances cannot establish it. Learning the word-gap median and
+spread needs at least three trusted adjacent gaps across at least two lines.
+
+For corrections, count **all** words and corrected words in a representative
+page or region, including words without a cross-out. Add a frequency row:
+
+```json
+{
+  "id": "page-0-correction-count",
+  "kind": "correction_frequency",
+  "source_path": "samples/page.png",
+  "source_sha256": "REPLACE_WITH_ACTUAL_IMAGE_SHA256",
+  "page_index": 0,
+  "scope": "page",
+  "representative": true,
+  "word_count": 100,
+  "correction_count": 4,
+  "review_status": "reviewed",
+  "reviewed_by": "Agent count of the full original page"
+}
+```
+
+The numbers illustrate the format; replace them with inspected counts. A
+`scope: "region"` row also requires `bbox_xywh` locating that region. Selected
+correction crops are not representative frequency evidence. Count each
+corrected word once. Keep regions separate; duplicate or overlapping regions
+cannot establish additional independent frequency evidence.
+
+Import isolated strikes or scribbles through `observations` with
+`role: "mark.correction"`, `text: "crossout"`, and the normal source, crop or
+mask, baseline, x-height, and review fields. Separate the mark from the letters
+underneath rather than tracing the whole deleted word as the mark. The importer
+produces centerline candidates for correction marks. Review the exact source
+and geometry hashes just as for letters. Frequency review and mark review are
+independent: both are needed for automatic sampled corrections.
+
+Training fits these measurements automatically after evidence review. With no
+representative correction count it does not infer a correction habit. Further
+sample evidence updates the private profile through a new version.
 
 ## Import, inspect, then approve exact geometry
 

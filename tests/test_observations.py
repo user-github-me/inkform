@@ -11,6 +11,7 @@ from unittest.mock import patch
 from PIL import Image, ImageDraw
 
 from inkform.ingest import sha256_file
+from inkform.measurements import measure_style
 from inkform.observations import import_observations
 from inkform.profiles import accepted_glyphs, validate_profile
 
@@ -133,6 +134,79 @@ class ObservationTests(unittest.TestCase):
         manifest.write_text(json.dumps(data))
         with self.assertRaises(ValueError): import_observations(manifest)
 
+    def test_crossout_mark_requires_exact_geometry_review_and_does_not_infer_rate(self):
+        source, manifest = self.writer("correction", 80)
+        mask = Image.new("L", (130, 45))
+        ImageDraw.Draw(mask).line((8, 27, 115, 16), fill=255, width=5)
+        mask.save(source.parent / "crossout.png")
+        manifest.write_text(json.dumps({"schema_version": "1.0", "observations": [{
+            "id": "strike-a", "text": "crossout", "role": "mark.correction",
+            "source_path": "page.png", "mask_path": "crossout.png", "baseline_px": 40,
+            "xheight_px": 40, "label_status": "reviewed", "reviewed_by": "fixture-author"}]}))
+        proposed = import_observations(manifest)
+        self.assertEqual(len(proposed["glyphs"]), 1)
+        self.assertEqual(proposed["glyphs"][0]["representation"], "centerline")
+        self.assertFalse(accepted_glyphs(proposed))
+        self.approve(proposed, bad_hash=True)
+        self.assertFalse(accepted_glyphs(import_observations(manifest)))
+        self.approve(proposed)
+        accepted = import_observations(manifest)
+        self.assertEqual(accepted_glyphs(accepted)[0]["text"], "crossout")
+        self.assertIsNone(measure_style(accepted)["correction_update"])
 
+    def test_portable_word_and_frequency_reviews_preserve_exact_source_bytes(self):
+        source, manifest = self.writer("style", 80)
+        original = source.read_bytes()
+        shared = {"source_path": "page.png", "source_sha256": sha256_file(source), "page_index": 0,
+                  "reviewed_by": "fixture-author"}
+        rows = [{**shared, "id": "page-count", "kind": "correction_frequency", "scope": "page",
+                 "representative": True, "word_count": 100, "correction_count": 7, "review_status": "reviewed"}]
+        for line in range(2):
+            for index, x in enumerate((10, 36, 64)):
+                rows.append({**shared, "id": f"word-{line}-{index}", "kind": "word", "line_id": f"line-{line}",
+                    "word_index": index, "bbox_xywh": [x, 10+line*30, 20, 15], "xheight_px": 10,
+                    "label_status": "reviewed", "layout_status": "reviewed"})
+        manifest.write_text(json.dumps({"schema_version": "1.0", "observations": [], "style_observations": rows}))
+        profile = import_observations(manifest)
+        self.assertEqual(len(profile["glyphs"]), 0)
+        self.assertEqual(profile["import_report"]["style_observation_count"], 7)
+        result = measure_style(profile)
+        self.assertEqual(result["correction_update"]["rate"], .07)
+        self.assertEqual(result["variation_update"]["word_gap_sample_count"], 4)
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(Path(profile["sources"][0]["source_path"]).read_bytes(), original)
+
+    def test_style_review_rejects_stale_source_hash_and_unknown_actor(self):
+        source, manifest = self.writer("style-review", 80)
+        row = {"id": "counts", "kind": "correction_frequency", "scope": "page", "representative": True,
+               "source_path": "page.png", "page_index": 0, "word_count": 20, "correction_count": 3,
+               "review_status": "reviewed", "reviewed_by": "fixture-author"}
+        data = {"schema_version": "1.0", "observations": [], "style_observations": [row]}
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "source_sha256"):
+            import_observations(manifest)
+        row["source_sha256"] = sha256_file(source)
+        row["reviewed_by"] = "unknown"
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "reviewed_by"):
+            import_observations(manifest)
+        row["reviewed_by"] = "fixture-author"
+        row["source_sha256"] = "0"*64
+        manifest.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "source_sha256"):
+            import_observations(manifest)
+
+    def test_frequency_rows_require_a_representative_denominator_and_valid_region(self):
+        source, manifest = self.writer("counts", 80)
+        row = {"id": "counts", "kind": "correction_frequency", "scope": "region", "representative": True,
+               "source_path": "page.png", "page_index": 0, "word_count": 20, "correction_count": 3,
+               "review_status": "proposed"}
+        data = {"schema_version": "1.0", "observations": [], "style_observations": [row]}
+        for change in ({}, {"bbox_xywh": [0, 0, 50, 50], "word_count": 0},
+                       {"word_count": 20, "correction_count": 21}, {"correction_count": 3, "representative": "yes"}):
+            row.update(change)
+            manifest.write_text(json.dumps(data))
+            with self.assertRaises(ValueError):
+                import_observations(manifest)
 if __name__ == "__main__":
     unittest.main()

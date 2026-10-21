@@ -77,6 +77,12 @@ def validate_document(document):
     _string(document.get("document_id"), "document_id")
     if not isinstance(document.get("content_mode"), str) or document["content_mode"] not in {"literal", "solve", "rewrite"}:
         fail("content_mode must be literal, solve, or rewrite.")
+    handwriting = document.get("handwriting", {})
+    if not isinstance(handwriting, dict) or set(handwriting) - {"corrections"}:
+        fail("handwriting accepts only the corrections setting.", "handwriting")
+    correction_mode = handwriting.get("corrections", "sampled")
+    if not isinstance(correction_mode, str) or correction_mode not in {"sampled", "none"}:
+        fail("handwriting.corrections must be sampled or none.", "handwriting.corrections")
     page = document.get("page", {})
     if not isinstance(page, dict):
         fail("page must be an object.")
@@ -109,7 +115,7 @@ def validate_document(document):
         identifier(block, path)
         if block.get("type") == "paragraph":
             if not isinstance(block.get("children"), list) or not block["children"]:
-                fail("Paragraphs need typed text/inline_math children.", path)
+                fail("Paragraphs need typed text, correction, or inline_math children.", path)
             for j, run in enumerate(block["children"]):
                 if not isinstance(run, dict):
                     fail("Expected a run object.", path)
@@ -120,6 +126,14 @@ def validate_document(document):
                         fail("Text contains unsupported control characters.", path)
                 elif run.get("type") == "inline_math":
                     validate_expression(run.get("expression"), path)
+                elif run.get("type") == "correction":
+                    run_path = f"{path}.children[{j}]"
+                    _string(run.get("deleted"), run_path + ".deleted")
+                    _string(run.get("text"), run_path + ".text", False)
+                    if not run["deleted"].strip():
+                        fail("A correction needs visible deleted text.", run_path + ".deleted")
+                    if any(ord(ch) < 32 or ch in "\u0085\u2028\u2029" for ch in run["deleted"] + run["text"]):
+                        fail("A correction is a single-line phrase; split multiline edits into separate runs.", run_path)
                 else:
                     fail("Unsupported paragraph child.", path)
         elif block.get("type") == "display_math":
@@ -184,7 +198,8 @@ def math_requirements(expr):
     raise AssertionError(t)
 
 
-def requirements(document):
+def requirements(document, *, include_deleted=False):
+    """Semantic symbols by default; optionally include visible deleted text."""
     validate_document(document)
     result = []
     for block in document["blocks"]:
@@ -193,7 +208,14 @@ def requirements(document):
         else:
             for run in block["children"]:
                 result.extend(math_requirements(run["expression"]) if run["type"] == "inline_math" else [("text", c) for c in clusters(run["text"]) if not c.isspace()])
+                if include_deleted and run["type"] == "correction":
+                    result.extend(("text", c) for c in clusters(run["deleted"]) if not c.isspace())
     return result
+
+
+def visible_requirements(document):
+    """Text/math coverage including deleted phrases; marks are checked by layout."""
+    return requirements(document, include_deleted=True)
 
 
 def math_text(expr):
@@ -211,4 +233,4 @@ def math_text(expr):
 
 
 def plain_text(document):
-    return "\n\n".join(math_text(b["expression"]) if b["type"] == "display_math" else "".join(r["text"] if r["type"] == "text" else math_text(r["expression"]) for r in b["children"]) for b in document["blocks"])
+    return "\n\n".join(math_text(b["expression"]) if b["type"] == "display_math" else "".join(math_text(r["expression"]) if r["type"] == "inline_math" else r["text"] for r in b["children"]) for b in document["blocks"])

@@ -6,6 +6,7 @@ import math
 import pytest
 
 from inkform.measurements import measure_style
+from inkform.profiles import validate_profile
 
 
 @pytest.fixture
@@ -149,3 +150,115 @@ def test_synthetic_geometry_cannot_be_claimed_as_personal_spacing_training(profi
     assert result["measurements"]["word_gap_xheight"]["count"] == 4
     assert result["metric_updates"] == {}
     assert any("synthetic demonstration" in item for item in result["uncertainties"])
+
+
+def frequency(profile, identity, words=100, corrections=5, *, scope="page", box=None, reviewed=True, representative=True):
+    profile["sources"][0]["sha256"] = "a"*64
+    observation = {"observation_id": identity, "source_id": "public-source", "source_sha256": "a"*64,
+        "kind": "correction_frequency", "page_index": 0, "scope": scope, "representative": representative,
+        "word_count": words, "correction_count": corrections, "review_status": "reviewed" if reviewed else "proposed",
+        "reviewed_by": "fixture-author" if reviewed else None}
+    if box is not None:
+        observation["bbox_xywh"] = box
+    profile["observations"].append(observation)
+    return observation
+
+
+def test_occurrence_spread_learns_only_independent_same_form_samples(profile):
+    for index, width in enumerate((.8, 1., 1.2)):
+        add_glyph(profile, f"n-{index}", text="n", width=width, height=1.+index*.02)
+    duplicate = copy.deepcopy(profile["glyphs"][1])
+    duplicate.update(glyph_id="n-outline", representation="clean_outline")
+    duplicate["strokes"][0]["closed"] = True
+    profile["glyphs"].append(duplicate)
+    alias = copy.deepcopy(profile["glyphs"][1])
+    alias.update(glyph_id="n-math", role="math.variable")
+    profile["glyphs"].append(alias)
+    for index, width in enumerate((1., 1.4)):
+        add_glyph(profile, f"arrow-{index}", text="→", role="math.operator", width=width)
+    learned = measure_style(profile)["variation_update"]
+    n = next(item for item in learned["by_glyph"] if item["text"] == "n")
+    assert n["source_count"] == 3
+    assert len(n["glyph_ids"]) == len(n["observation_ids"]) == 3
+    assert n["width"] == .15
+    assert n["height"] == pytest.approx(1.4826*.02/1.02)
+    arrow = next(item for item in learned["by_glyph"] if item["text"] == "→")
+    assert arrow["width"] == .15
+    assert all(item["role"] != "math.variable" for item in learned["by_glyph"])
+    profile["variation"] = {"amount": 0, "learned": learned}
+    validate_profile(profile)
+
+
+def test_one_sample_and_geometric_aliases_do_not_establish_spread(profile):
+    original = add_glyph(profile, "original", text="n")
+    outline = copy.deepcopy(original)
+    outline.update(glyph_id="outline", representation="clean_outline")
+    outline["strokes"][0]["closed"] = True
+    profile["glyphs"].append(outline)
+    assert measure_style(profile)["variation_update"] is None
+    # Distinct geometry without distinct source observations is not learning.
+    for glyph in profile["glyphs"]:
+        glyph["source_refs"] = [{"source_id": "public-source"}]
+    profile["glyphs"][1]["advance"] += .2
+    assert measure_style(profile)["variation_update"] is None
+
+
+def test_word_gap_spread_retains_adjacent_reviewed_evidence(profile):
+    add_words(profile, 0, [0, 16, 34])
+    add_words(profile, 1, [0, 18, 38])
+    model = measure_style(profile)["variation_update"]
+    assert model["by_glyph"] == []
+    assert model["word_gap_sample_count"] == 4
+    assert model["word_gap"] == pytest.approx(1.4826*.1/.8)
+    assert len(model["word_gap_observation_ids"]) == 6
+    profile["variation"] = {"learned": model}
+    validate_profile(profile)
+
+
+def test_corrections_need_representative_frequency_not_selected_marks(profile):
+    add_glyph(profile, "crossout", text="crossout", role="mark.correction", height=.1)
+    assert measure_style(profile)["correction_update"] is None
+    frequency(profile, "selected-marks", words=3, corrections=3, representative=False)
+    frequency(profile, "unreviewed-page", reviewed=False)
+    assert measure_style(profile)["correction_update"] is None
+    frequency(profile, "page-count", words=100, corrections=7)
+    result = measure_style(profile)
+    assert result["correction_update"]["rate"] == .07
+    assert result["correction_update"]["sampled_word_count"] == 100
+    assert result["correction_update"]["observation_ids"] == ["page-count"]
+    profile["corrections"] = result["correction_update"]
+    validate_profile(profile)
+
+
+def test_duplicate_and_overlapping_frequency_regions_are_not_double_counted(profile):
+    frequency(profile, "count-a", words=50, corrections=2, scope="region", box=[0, 0, 100, 100])
+    frequency(profile, "count-alias", words=50, corrections=2, scope="region", box=[0, 0, 100, 100])
+    frequency(profile, "overlap", words=30, corrections=4, scope="region", box=[50, 0, 100, 100])
+    frequency(profile, "independent", words=50, corrections=3, scope="region", box=[0, 100, 100, 100])
+    result = measure_style(profile)
+    assert result["correction_update"]["sampled_word_count"] == 100
+    assert result["correction_update"]["rate"] == .05
+    assert result["correction_frequency_exclusions"] == {"duplicate_frequency_region": 1, "overlapping_frequency_region": 1}
+    profile["corrections"] = result["correction_update"]
+    validate_profile(profile)
+
+
+def test_conflicting_counts_and_synthetic_profiles_do_not_learn_habits(profile):
+    frequency(profile, "first-count", corrections=2)
+    frequency(profile, "conflicting-count", corrections=9)
+    result = measure_style(profile)
+    assert result["correction_update"] is None
+    assert result["correction_frequency_exclusions"] == {"conflicting_counts_for_same_region": 2}
+    profile["observations"].pop()
+    profile["synthetic"] = True
+    assert measure_style(profile)["correction_update"] is None
+    assert measure_style(profile)["variation_update"] is None
+
+
+def test_frequency_rate_is_bounded_and_zero_evidence_is_retained(profile):
+    record = frequency(profile, "page", corrections=70)
+    assert measure_style(profile)["correction_update"]["rate"] == .35
+    record["correction_count"] = 0
+    update = measure_style(profile)["correction_update"]
+    assert update["rate"] == 0
+    assert update["sampled_word_count"] == 100

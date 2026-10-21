@@ -7,6 +7,7 @@ loading a profile never opens a source photograph or an external geometry file.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -24,7 +25,7 @@ from jsonschema import Draft202012Validator
 from .errors import InkformError
 
 
-ROLES = frozenset({"text", "math.variable", "math.digit", "math.operator", "math.function"})
+ROLES = frozenset({"text", "math.variable", "math.digit", "math.operator", "math.function", "mark.correction"})
 RENDER_MODES = frozenset({"fresh_strokes", "clean_outline"})
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _RASTER_SHAPE_KEYS = frozenset({
@@ -155,6 +156,169 @@ def geometry_bounds(strokes: list[dict]) -> list[float]:
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
+def reviewed_actor(value) -> bool:
+    """A review must identify an actor, rather than an unknown placeholder."""
+    return isinstance(value, str) and bool(value.strip()) and value.strip().lower() not in {"unknown", "none", "unreviewed"}
+
+
+def glyph_evidence_key(glyph: dict, observations: dict) -> tuple:
+    """One source mask remains one sample across aliases/representations."""
+    identities = []
+    for ref in glyph.get("source_refs", []):
+        identity = ref.get("observation_id")
+        if identity:
+            observation = observations.get(identity, {})
+            identities.append(("mask", observation["mask_sha256"]) if observation.get("mask_sha256")
+                              else (ref["source_id"], identity))
+    if identities:
+        return tuple(sorted(set(identities)))
+    digest = hashlib.sha256(json.dumps(glyph["strokes"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return ("geometry_record", digest)
+
+
+def independent_frequency_observations(profile: dict, candidates: list[dict] | None = None) -> tuple[list[dict], dict]:
+    """Keep reviewed representative, nonoverlapping correction counts once."""
+    sources = {source["source_id"]: source for source in profile["sources"]}
+    groups, excluded = {}, Counter()
+    for observation in profile.get("observations", []) if candidates is None else candidates:
+        if observation.get("kind") != "correction_frequency":
+            continue
+        if (observation.get("review_status") != "reviewed" or not reviewed_actor(observation.get("reviewed_by"))
+                or observation.get("representative") is not True):
+            excluded["not_reviewed_representative_frequency"] += 1
+            continue
+        source = sources[observation["source_id"]]
+        key = (source.get("sha256", source["source_id"]), observation["page_index"], observation["scope"],
+               tuple(observation["bbox_xywh"]) if observation["scope"] == "region" else ())
+        groups.setdefault(key, []).append(observation)
+    unique = []
+    for key, records in groups.items():
+        if len({(item["word_count"], item["correction_count"]) for item in records}) > 1:
+            excluded["conflicting_counts_for_same_region"] += len(records)
+            continue
+        unique.append((key, min(records, key=lambda item: item["observation_id"])))
+        excluded["duplicate_frequency_region"] += len(records)-1
+    selected = []
+    for key, observation in sorted(unique, key=lambda pair: (pair[0][0], pair[0][1], pair[0][2] != "page", pair[0][3])):
+        overlap = False
+        for previous_key, _ in selected:
+            if previous_key[:2] != key[:2]:
+                continue
+            if previous_key[2] == "page" or key[2] == "page":
+                overlap = True
+                break
+            x, y, w, h = key[3]
+            px, py, pw, ph = previous_key[3]
+            if max(x, px) < min(x+w, px+pw) and max(y, py) < min(y+h, py+ph):
+                overlap = True
+                break
+        if overlap:
+            excluded["overlapping_frequency_region"] += 1
+        else:
+            selected.append((key, observation))
+    return [observation for _, observation in selected], {key: count for key, count in excluded.items() if count}
+
+
+def _validate_style_models(profile: dict, observations: dict) -> None:
+    learned = profile.get("variation", {}).get("learned")
+    if learned is not None:
+        if profile["synthetic"]:
+            _invalid("Synthetic profiles cannot claim learned personal variation.", "/variation/learned")
+        glyphs = {glyph["glyph_id"]: glyph for glyph in accepted_glyphs(profile)}
+        forms = set()
+        for index, model in enumerate(learned["by_glyph"]):
+            path = f"/variation/learned/by_glyph/{index}"
+            form = (model["role"], model["text"])
+            if form in forms:
+                _invalid("Learned variation must have one entry per role and text.", path)
+            forms.add(form)
+            evidence, observation_ids = set(), set()
+            for identity in model["glyph_ids"]:
+                glyph = glyphs.get(identity)
+                if glyph is None or (glyph["role"], glyph["text"]) != form:
+                    _invalid("Variation evidence must name reviewed glyphs of the same form.", path)
+                refs = glyph["source_refs"]
+                if not refs or any(ref.get("observation_id") not in observations for ref in refs):
+                    _invalid("Learned variation requires observation provenance for every sample.", path)
+                observation_ids.update(ref["observation_id"] for ref in refs)
+                evidence.add(glyph_evidence_key(glyph, observations))
+            if len(evidence) != model["source_count"] or len(evidence) < 2:
+                _invalid("Variation source_count must count independent source observations, not aliases.", path)
+            if observation_ids != set(model["observation_ids"]):
+                _invalid("Variation observation IDs must match the reviewed glyph evidence.", path)
+        word_groups = {}
+        for identity in learned["word_gap_observation_ids"]:
+            observation = observations.get(identity, {})
+            if (observation.get("kind") != "word" or observation.get("label_status") != "reviewed"
+                    or observation.get("layout_status") != "reviewed" or not reviewed_actor(observation.get("reviewed_by"))):
+                _invalid("Word-gap variation requires reviewed word layout evidence.", "/variation/learned/word_gap_observation_ids")
+            box, xheight = observation.get("bbox_xywh"), observation.get("xheight_px")
+            if (not isinstance(box, list) or len(box) != 4 or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in box)
+                    or min(box[2:]) <= 0 or isinstance(xheight, bool) or not isinstance(xheight, (int, float)) or xheight <= 0):
+                _invalid("Learned word-gap evidence requires valid pixel boxes and local x-height.", "/variation/learned/word_gap_observation_ids")
+            for field in ("page_index", "word_index"):
+                value = observation.get(field)
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    _invalid("Learned word-gap evidence needs explicit page and word indices.", "/variation/learned/word_gap_observation_ids")
+            if not all(isinstance(observation.get(field, default), str) and observation.get(field, default).strip()
+                       for field, default in (("line_id", None), ("column_id", "body"))):
+                _invalid("Learned word-gap evidence needs explicit line identities.", "/variation/learned/word_gap_observation_ids")
+            key = (observation["source_id"], observation["page_index"], observation.get("column_id", "body"), observation["line_id"])
+            word_groups.setdefault(key, []).append(observation)
+        gap_count = learned["word_gap_sample_count"]
+        actual_gaps, gap_lines = 0, 0
+        for words in word_groups.values():
+            words.sort(key=lambda word: word["word_index"])
+            if len({word["word_index"] for word in words}) != len(words):
+                _invalid("Learned word-gap evidence cannot include ambiguous duplicate word indices.", "/variation/learned/word_gap_observation_ids")
+            line_gaps = 0
+            for left, right in zip(words, words[1:]):
+                lb, rb = left["bbox_xywh"], right["bbox_xywh"]
+                if (right["word_index"] == left["word_index"]+1 and rb[0] > lb[0]+lb[2]
+                        and max(left["xheight_px"], right["xheight_px"])/min(left["xheight_px"], right["xheight_px"]) <= 1.25
+                        and max(lb[1], rb[1]) < min(lb[1]+lb[3], rb[1]+rb[3])):
+                    line_gaps += 1
+            actual_gaps += line_gaps
+            gap_lines += line_gaps > 0
+        if (gap_count != actual_gaps or (gap_count and (gap_count < 3 or gap_lines < 2))
+                or (learned["word_gap"] > 0 and not gap_count)):
+            _invalid("Word-gap variation must retain its supporting adjacent-word observations.", "/variation/learned/word_gap_sample_count")
+        if not forms and not gap_count:
+            _invalid("A learned variation model must retain supported form or word-gap evidence.", "/variation/learned")
+    corrections = profile.get("corrections")
+    if corrections is None:
+        return
+    path = "/corrections"
+    if corrections["correction_count"] > corrections["sampled_word_count"]:
+        _invalid("Correction counts cannot exceed the number of sampled words.", path)
+    expected_rate = min(.35, corrections["correction_count"] / corrections["sampled_word_count"])
+    if not math.isclose(corrections["rate"], expected_rate, abs_tol=1e-12):
+        _invalid("Correction rate must match the bounded reviewed word frequency.", path)
+    if corrections["basis"] == "synthetic_demo":
+        if not profile["synthetic"] or corrections["observation_ids"] or corrections["source_refs"]:
+            _invalid("Authored demo correction rates belong only to synthetic profiles without personal evidence.", path)
+        return
+    if profile["synthetic"] or not corrections["observation_ids"]:
+        _invalid("Learned correction rates require nonsynthetic reviewed frequency evidence.", path)
+    count, words, expected_refs = 0, 0, set()
+    for identity in corrections["observation_ids"]:
+        observation = observations.get(identity, {})
+        if (observation.get("kind") != "correction_frequency" or observation.get("review_status") != "reviewed"
+                or observation.get("representative") is not True or not reviewed_actor(observation.get("reviewed_by"))):
+            _invalid("Correction rates require reviewed representative word-frequency observations.", path)
+        count += observation["correction_count"]
+        words += observation["word_count"]
+        expected_refs.add((observation["source_id"], identity))
+    selected, _ = independent_frequency_observations(profile, [observations[identity] for identity in corrections["observation_ids"]])
+    if len(selected) != len(corrections["observation_ids"]):
+        _invalid("Correction frequencies must not double-count duplicate or overlapping sample regions.", path)
+    if count != corrections["correction_count"] or words != corrections["sampled_word_count"]:
+        _invalid("Correction totals must match their reviewed frequency observations.", path)
+    refs = {(ref["source_id"], ref.get("observation_id")) for ref in corrections["source_refs"]}
+    if refs != expected_refs:
+        _invalid("Correction source references must match their frequency observations.", path)
+
+
 def validate_profile(profile: dict) -> dict:
     """Validate shape, units, provenance, and vector geometry; return the input."""
     _check_json(profile)
@@ -162,11 +326,15 @@ def validate_profile(profile: dict) -> dict:
     if error is not None:
         _invalid(error.message, "/" + "/".join(map(str, error.absolute_path)))
     source_ids: set[str] = set()
+    sources = {}
     for index, source in enumerate(profile["sources"]):
         source_id = source["source_id"]
         if source_id in source_ids:
             _invalid("Source IDs must be unique.", f"/sources/{index}/source_id", source_id=source_id)
         source_ids.add(source_id)
+        sources[source_id] = source
+        if source.get("synthetic", profile["synthetic"]) != profile["synthetic"]:
+            _invalid("Synthetic and personal source evidence cannot be mixed.", f"/sources/{index}/synthetic")
     observations: dict[str, dict] = {}
     for index, observation in enumerate(profile.get("observations", [])):
         identity = observation["observation_id"]
@@ -174,6 +342,20 @@ def validate_profile(profile: dict) -> dict:
             _invalid("Observation IDs must be unique.", f"/observations/{index}/observation_id")
         if observation["source_id"] not in source_ids:
             _invalid("Observation source reference does not name a stored source.", f"/observations/{index}/source_id")
+        path = f"/observations/{index}"
+        if observation.get("synthetic", profile["synthetic"]) != profile["synthetic"]:
+            _invalid("Synthetic and personal observations cannot be mixed.", f"{path}/synthetic")
+        source_hash = sources[observation["source_id"]].get("sha256")
+        if "source_sha256" in observation and observation["source_sha256"] != source_hash:
+            _invalid("An observation review must refer to its exact stored source bytes.", f"{path}/source_sha256")
+        if observation.get("kind") == "correction_frequency":
+            if observation["correction_count"] > observation["word_count"]:
+                _invalid("Count corrected words once within the complete sampled word count.", path)
+            bbox = observation.get("bbox_xywh")
+            if bbox is not None and (min(bbox[:2]) < 0 or min(bbox[2:]) <= 0):
+                _invalid("Frequency regions require a nonempty source-pixel rectangle.", f"{path}/bbox_xywh")
+            if observation["review_status"] == "reviewed" and (not reviewed_actor(observation.get("reviewed_by")) or not observation.get("source_sha256")):
+                _invalid("Reviewed frequency counts need an identified actor and the exact source hash.", path)
         observations[identity] = observation
     glyph_ids: set[str] = set()
     for index, glyph in enumerate(profile["glyphs"]):
@@ -182,10 +364,12 @@ def validate_profile(profile: dict) -> dict:
         if glyph_id in glyph_ids:
             _invalid("Glyph IDs must be unique; retain variants under separate IDs.", f"{path}/glyph_id", glyph_id=glyph_id)
         glyph_ids.add(glyph_id)
+        if glyph.get("synthetic", profile["synthetic"]) != profile["synthetic"]:
+            _invalid("Synthetic and personal glyph evidence cannot be mixed.", f"{path}/synthetic")
         for key in _RASTER_SHAPE_KEYS.intersection(glyph):
             _invalid("Renderable glyphs must contain vector paths, never raster shapes.", f"{path}/{key}")
         reviewed = glyph["label_status"] == "reviewed" or glyph["geometry_status"] == "reviewed"
-        if reviewed and (not glyph["reviewed_by"] or not glyph["reviewed_by"].strip()):
+        if reviewed and not reviewed_actor(glyph["reviewed_by"]):
             _invalid("Reviewed glyphs must identify their review actor.", f"{path}/reviewed_by")
         if reviewed and not profile["synthetic"] and not glyph["source_refs"]:
             _invalid("Reviewed personal glyphs must retain source provenance.", f"{path}/source_refs")
@@ -217,12 +401,13 @@ def validate_profile(profile: dict) -> dict:
                 positions = [sample["s"] for sample in samples]
                 if positions[0] != 0 or positions[-1] != 1 or any(a >= b for a, b in zip(positions, positions[1:])):
                     _invalid("Width profiles must run from 0 to 1 with strictly increasing positions.", f"{stroke_path}/width_profile")
+    _validate_style_models(profile, observations)
     return profile
 
 
 def accepted_glyphs(profile: dict) -> list[dict]:
     """Return reviewed forms only; proposed/rejected evidence remains stored."""
-    return [glyph for glyph in profile["glyphs"] if glyph["label_status"] == "reviewed" and glyph["geometry_status"] == "reviewed" and bool(glyph.get("reviewed_by"))]
+    return [glyph for glyph in profile["glyphs"] if glyph["label_status"] == "reviewed" and glyph["geometry_status"] == "reviewed" and reviewed_actor(glyph.get("reviewed_by"))]
 
 
 def coverage(profile: dict, requirements: Iterable[tuple[str, str]]) -> dict:
@@ -393,6 +578,8 @@ def merge_profile(existing: dict, incoming: dict, profile_version: str | None = 
         _invalid("A profile update must be an object.")
     if incoming.get("profile_id", existing["profile_id"]) != existing["profile_id"]:
         _invalid("An update cannot change the profile ID.", "/profile_id")
+    if incoming.get("synthetic", existing["synthetic"]) != existing["synthetic"]:
+        _invalid("An update cannot mix a synthetic profile with personal handwriting evidence.", "/synthetic")
     result = _merge_dict(existing, {key: value for key, value in incoming.items() if key not in {"glyphs", "sources", "observations", "profile_version"}})
     for key, id_key in (("sources", "source_id"), ("observations", "observation_id"), ("glyphs", "glyph_id")):
         if key not in existing and key not in incoming:

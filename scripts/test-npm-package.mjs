@@ -40,6 +40,12 @@ try {
   assert.equal(check.handwriting_raster_objects, 0);
   assert.equal(check.font_text_operators, 0);
   assert.ok(check.vector_path_count > 0);
+  const correctionsPdf = join(temporary, 'corrections.pdf');
+  command(binary, ['render', join(examples, 'corrections.json'), '--profile', join(examples, 'synthetic-profile.json'), '--output', correctionsPdf]);
+  const corrections = JSON.parse(readFileSync(join(temporary, 'corrections.build.json'), 'utf8'));
+  assert.ok(corrections.corrections.some(edit => edit.kind === 'explicit'));
+  assert.ok(corrections.visible_symbol_count > corrections.rendered_symbol_count);
+  assert.equal(corrections.required_symbol_count, corrections.rendered_symbol_count);
   const installed = join(temporary, 'standalone skill');
   command(binary, ['skill', 'install', '--path', installed]);
   // Delete the npx/global-style package to verify that the installed skill survives it.

@@ -1,11 +1,18 @@
 {
   "source": "examples/synthetic-profile.json",
+  "document": "examples/corrections.json",
   "synthetic": true,
   "personal_sources": 0,
   "seed": 72,
   "representation": "centerline",
   "pen_width_mm": 0.38,
   "width_profile": "constant",
+  "variation": {
+    "amount": 0.1,
+    "basis": "conservative_estimate"
+  },
+  "corrections": "explicit authored examples; no fabricated sample habit",
+  "geometry_hash": "2cbd6fb2517adc9c9305cbfc8a2f673d027660099648e20f31e3abfbb53b355b",
   "artifacts": [
     "handwriting.svg",
     "mathematics.svg",

@@ -1,6 +1,6 @@
 {
   "name": "@nazifbd/inkform",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Learn private handwriting profiles and write printable vector PDFs, with an open agent skill",
   "type": "module",
   "bin": {
@@ -34,7 +34,14 @@
     "url": "https://github.com/user-github-me/inkform/issues"
   },
   "license": "MIT",
-  "keywords": ["handwriting", "pdf", "vector", "agent-skill", "local-first", "inkform"],
+  "keywords": [
+    "handwriting",
+    "pdf",
+    "vector",
+    "agent-skill",
+    "local-first",
+    "inkform"
+  ],
   "publishConfig": {
     "access": "public"
   }

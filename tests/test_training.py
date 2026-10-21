@@ -290,3 +290,52 @@ def test_empty_sample_folder_does_not_create_a_trained_profile(tmp_path, monkeyp
         train_profile(tmp_path, "empty-writer")
     assert error.value.code == "empty_training_samples"
     assert not (tmp_path / "private" / "profiles").exists()
+
+
+def test_training_persists_sampled_variation_and_correction_counts_and_retains_amount_zero(inputs):
+    base = import_samples(inputs["samples"], profile_id="variable-writer")
+    base["variation"] = {"amount": 0}
+    original_path = save_profile(base)
+    original_bytes = original_path.read_bytes()
+    second = Image.new("L", (64, 80))
+    ImageDraw.Draw(second).ellipse((9, 24, 54, 66), outline=255, width=5)
+    second.save(inputs["root"] / "second-mask.png")
+    data = json.loads(inputs["manifest"].read_text())
+    row = copy.deepcopy(data["observations"][0])
+    row.update(id="second-o", mask_path="second-mask.png")
+    data["observations"].append(row)
+    data["style_observations"] = [{"id": "counted-page", "kind": "correction_frequency", "scope": "page",
+        "source_path": "samples/page.png", "source_sha256": sha256_file(inputs["samples"] / "page.png"),
+        "page_index": 0, "representative": True, "word_count": 100, "correction_count": 6,
+        "review_status": "reviewed", "reviewed_by": "fixture-author"}]
+    inputs["manifest"].write_text(json.dumps(data))
+    proposed = train_profile(inputs["samples"], "variable-writer", observations=inputs["manifest"])
+    approve(proposed)
+    trained = train_profile(inputs["samples"], "variable-writer", observations=inputs["manifest"])
+    assert trained["ok"], trained["diagnostics"]
+    profile = load_profile(trained["profile_path"])
+    assert profile["variation"]["amount"] == 0
+    model = profile["variation"]["learned"]["by_glyph"][0]
+    assert model["text"] == "o" and model["source_count"] == 2
+    assert model["width"] > 0
+    assert profile["corrections"]["rate"] == .06
+    assert profile["corrections"]["sampled_word_count"] == 100
+    # Training can resume without reimporting: no duplicate aliases inflate it.
+    resumed = train_profile(inputs["samples"], "variable-writer")
+    again = load_profile(resumed["profile_path"])
+    assert again["variation"] == profile["variation"]
+    assert again["corrections"] == profile["corrections"]
+    assert original_path.read_bytes() == original_bytes
+
+
+def test_training_preflight_requests_deleted_text_and_explicit_correction_marks(inputs):
+    writer = approved_writer(inputs)
+    note = literal_document("o")
+    note["blocks"][0]["children"][0].update(type="correction", deleted="z")
+    missing_letter = train_profile(inputs["samples"], writer, observations=inputs["manifest"], document=note)
+    requests = missing_letter["document_readiness"]["missing_form_requests"]
+    assert [(item["role"], item["text"]) for item in requests] == [("text", "z")]
+    note["blocks"][0]["children"][0]["deleted"] = "o"
+    missing_mark = train_profile(inputs["samples"], writer, document=note)
+    assert missing_mark["document_readiness"]["status"] == "missing_correction_mark"
+    assert not missing_mark["document_readiness"]["ready"]

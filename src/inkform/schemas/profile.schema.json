@@ -48,28 +48,306 @@
     "calibration_status": {"enum": ["unreviewed", "agent_reviewed", "user_reviewed", "pending_user_feedback"]},
     "sources": {"type": "array", "items": {"$ref": "#/$defs/source"}},
     "observations": {"type": "array", "items": {"$ref": "#/$defs/observation"}},
-    "glyphs": {"type": "array", "items": {"$ref": "#/$defs/glyph"}}
+    "glyphs": {"type": "array", "items": {"$ref": "#/$defs/glyph"}},
+    "variation": {
+      "type": "object",
+      "properties": {
+        "amount": {
+          "$ref": "#/$defs/relativeAmplitude"
+        },
+        "learned": {
+          "type": "object",
+          "required": [
+            "version",
+            "basis",
+            "by_glyph",
+            "word_gap",
+            "word_gap_sample_count",
+            "word_gap_observation_ids"
+          ],
+          "properties": {
+            "version": {
+              "const": "inkform-variation-1"
+            },
+            "basis": {
+              "const": "reviewed_samples"
+            },
+            "by_glyph": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/variationForm"
+              }
+            },
+            "word_gap": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 0.25
+            },
+            "word_gap_sample_count": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "word_gap_observation_ids": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/safeId"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "corrections": {
+      "type": "object",
+      "required": [
+        "rate",
+        "basis",
+        "sampled_word_count",
+        "correction_count",
+        "observation_ids",
+        "source_refs"
+      ],
+      "properties": {
+        "rate": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.35
+        },
+        "basis": {
+          "enum": [
+            "reviewed_samples",
+            "synthetic_demo"
+          ]
+        },
+        "sampled_word_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "correction_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "observation_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeId"
+          }
+        },
+        "source_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/sourceRef"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
   },
   "$defs": {
+    "relativeAmplitude": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 0.3
+    },
+    "variationForm": {
+      "type": "object",
+      "required": [
+        "role",
+        "text",
+        "width",
+        "height",
+        "source_count",
+        "glyph_ids",
+        "observation_ids"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "text",
+            "math.variable",
+            "math.digit",
+            "math.operator",
+            "math.function",
+            "mark.correction"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "width": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.15
+        },
+        "height": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0.12
+        },
+        "source_count": {
+          "type": "integer",
+          "minimum": 2
+        },
+        "glyph_ids": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeId"
+          }
+        },
+        "observation_ids": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/safeId"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "safeId": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$", "not": {"pattern": "[^A-Za-z0-9._-]"}},
     "point": {"type": "array", "prefixItems": [{"type": "number"}, {"type": "number"}], "minItems": 2, "maxItems": 2},
     "reviewStatus": {"enum": ["reviewed", "proposed", "rejected"]},
     "strokeOrder": {"enum": ["estimated", "captured", "unknown", "not_applicable"]},
     "source": {
-      "type": "object", "required": ["source_id"],
-      "properties": {"source_id": {"$ref": "#/$defs/safeId"}, "sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-fA-F]{64}$"}}
+      "type": "object",
+      "required": [
+        "source_id"
+      ],
+      "properties": {
+        "source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "synthetic": {
+          "type": "boolean"
+        }
+      }
     },
     "sourceRef": {
       "type": "object", "required": ["source_id"],
       "properties": {"source_id": {"$ref": "#/$defs/safeId"}, "observation_id": {"$ref": "#/$defs/safeId"}}
     },
     "observation": {
-      "type": "object", "required": ["observation_id", "source_id"],
+      "type": "object",
+      "required": [
+        "observation_id",
+        "source_id"
+      ],
       "properties": {
-        "observation_id": {"$ref": "#/$defs/safeId"},
-        "source_id": {"$ref": "#/$defs/safeId"},
-        "mask_sha256": {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-fA-F]{64}$"}
-      }
+        "observation_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "source_id": {
+          "$ref": "#/$defs/safeId"
+        },
+        "mask_sha256": {
+          "type": "string",
+          "minLength": 64,
+          "maxLength": 64,
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "synthetic": {
+          "type": "boolean"
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{64}$"
+        },
+        "review_status": {
+          "$ref": "#/$defs/reviewStatus"
+        },
+        "reviewed_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "const": "correction_frequency"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "page_index",
+              "scope",
+              "representative",
+              "word_count",
+              "correction_count",
+              "review_status"
+            ],
+            "properties": {
+              "page_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "scope": {
+                "enum": [
+                  "page",
+                  "region"
+                ]
+              },
+              "representative": {
+                "type": "boolean"
+              },
+              "word_count": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "correction_count": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "bbox_xywh": {
+                "type": "array",
+                "minItems": 4,
+                "maxItems": 4,
+                "items": {
+                  "type": "number"
+                }
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "scope": {
+                      "const": "region"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "bbox_xywh"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
     },
     "segment": {
       "oneOf": [
@@ -99,7 +377,8 @@
       "properties": {
         "glyph_id": {"$ref": "#/$defs/safeId"},
         "text": {"type": "string", "minLength": 1},
-        "role": {"enum": ["text", "math.variable", "math.digit", "math.operator", "math.function"]},
+        "role": {"enum": ["text", "math.variable", "math.digit", "math.operator", "math.function", "mark.correction"]},
+        "synthetic": {"type": "boolean"},
         "representation": {"enum": ["centerline", "clean_outline"]},
         "advance": {"type": "number", "exclusiveMinimum": 0},
         "ink_bounds": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4},
@@ -118,7 +397,8 @@
         }
       },
       "allOf": [
-        {"if": {"properties": {"representation": {"const": "clean_outline"}}}, "then": {"properties": {"strokes": {"items": {"required": ["closed"], "properties": {"closed": {"const": true}}}}}}}
+        {"if": {"properties": {"representation": {"const": "clean_outline"}}}, "then": {"properties": {"strokes": {"items": {"required": ["closed"], "properties": {"closed": {"const": true}}}}}}},
+        {"if": {"properties": {"role": {"const": "mark.correction"}}}, "then": {"properties": {"text": {"const": "crossout"}}}}
       ]
     }
   }

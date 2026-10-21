@@ -12,6 +12,19 @@ inkform skill install
 
 `skill install` copies a self-contained skill to `~/.agents/skills/inkform`. Use `--path /desired/skill/inkform` for another agent's skill directory. This path is the final skill directory. Existing directories are preserved; `--force` replaces only a previous installation bearing Inkform's installation marker. Reload the agent after installation. The skill launcher preserves the caller's working directory, so relative document and output paths work normally.
 
+To upgrade the engine and an existing standalone skill:
+
+```sh
+npm install -g @nazifbd/inkform@latest
+inkform setup
+inkform skill install --force
+```
+
+Use the original `--path` for a custom skill location, then reload the agent.
+An older writer profile can use conservative occurrence variation immediately.
+To learn its personal range or add sampled cross-outs, resume training with
+the repeated-form and correction evidence described in [training.md](training.md).
+
 You can also use `npx --yes @nazifbd/inkform setup` and `npx --yes @nazifbd/inkform skill install`. The npm package is scoped; its executable remains `inkform`. The copied skill contains its own runtime, so it does not depend on npm's temporary download directory remaining available. To set it up later, run `node runtime/bin/inkform.mjs setup` from the installed skill directory.
 
 If this skill was copied alone by a skill manager, install the engine with `npm install -g @nazifbd/inkform` followed by `inkform setup`. Copying only `SKILL.md` does not install the engine. macOS and Linux are the primary supported environments; Windows has not been validated.

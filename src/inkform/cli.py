@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 
 from . import __version__
-from .document import literal_document, load_document, requirements
+from .document import literal_document, load_document, visible_requirements
 from .errors import InkformError
 from .profiles import accepted_glyphs, coverage, default_data_dir, load_profile, merge_profile, resolve_render_mode, save_profile
 
@@ -124,8 +124,14 @@ def run(args):
         if op == "coverage":
             mode = resolve_render_mode(profile, args.mode)
             rep = "centerline" if mode == "fresh_strokes" else "clean_outline"
-            eligible = {**profile, "glyphs": [g for g in profile["glyphs"] if g["representation"] == rep]}
-            result = coverage(eligible, requirements(load_document(args.document)))
+            eligible = {**profile, "glyphs": [g for g in profile["glyphs"] if
+                (g["role"] != "mark.correction" and g["representation"] == rep)
+                or (g["role"] == "mark.correction" and g["representation"] == "centerline")]}
+            document = load_document(args.document)
+            needed = visible_requirements(document)
+            needed.extend(("mark.correction", "crossout") for block in document["blocks"]
+                          for run in block.get("children", []) if run["type"] == "correction")
+            result = coverage(eligible, needed)
             return {"ok": result["complete"], "mode": mode, **result}
         result = _summary(profile)
         if args.preview:

@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "document_id": "synthetic-variation-and-corrections",
+  "content_mode": "literal",
+  "handwriting": {"corrections": "none"},
+  "page": {"width_mm": 210, "height_mm": 297, "margins_mm": 22, "body_x_height_mm": 3.4},
+  "blocks": [
+    {"id": "title", "type": "paragraph", "children": [
+      {"id": "title-text", "type": "text", "text": "Inkform\nA little less copy and paste."}
+    ]},
+    {"id": "disclosure", "type": "paragraph", "children": [
+      {"id": "disclosure-text", "type": "text", "text": "An authored synthetic demonstration.\nNo personal handwriting samples are included."}
+    ]},
+    {"id": "repetition", "type": "paragraph", "children": [
+      {"id": "repetition-text", "type": "text", "text": "nnnn nnnn nnnn\nminimum minimum minimum\nSame letters, slightly different movements."}
+    ]},
+    {"id": "correction-example", "type": "paragraph", "children": [
+      {"id": "correction-before", "type": "text", "text": "Keep the "},
+      {"id": "correction-edit", "type": "correction", "deleted": "copy", "text": "character"},
+      {"id": "correction-after", "type": "text", "text": ". Write something new."}
+    ]},
+    {"id": "math-label", "type": "paragraph", "children": [
+      {"id": "math-label-text", "type": "text", "text": "Three limits. Different arrows, precise directions."}
+    ]},
+    {"id": "left-limit", "type": "display_math", "expression": {"type": "limit", "variable": "x", "approaches": {"type": "number", "value": "2"}, "direction": "left", "body": {"type": "function_call", "name": "f", "arguments": [{"type": "symbol", "value": "x"}]}}},
+    {"id": "right-limit", "type": "display_math", "expression": {"type": "limit", "variable": "x", "approaches": {"type": "number", "value": "2"}, "direction": "right", "body": {"type": "function_call", "name": "f", "arguments": [{"type": "symbol", "value": "x"}]}}},
+    {"id": "two-sided-limit", "type": "display_math", "expression": {"type": "limit", "variable": "x", "approaches": {"type": "number", "value": "2"}, "direction": "both", "body": {"type": "fraction", "numerator": {"type": "symbol", "value": "x"}, "denominator": {"type": "number", "value": "2"}}}},
+    {"id": "footer", "type": "paragraph", "children": [
+      {"id": "footer-text", "type": "text", "text": "Print this vector PDF at Actual Size / 100%.\nThe crossed-out word is an explicit example edit.\nPersonal profiles learn correction habits from reviewed samples."}
+    ]}
+  ],
+  "unresolved_inputs": []
+}

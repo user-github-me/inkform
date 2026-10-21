@@ -137,6 +137,13 @@ GREEK = {
     "ω": "M .21 .96 C -.15 .39 .11 -.19 .49 .14 L .64 .60 C .49 -.15 1.12 -.22 1.24 .40 C 1.30 .64 1.24 .84 1.14 .99",
 }
 
+# Two original correction gestures, independently authored for the public demo.
+# These describe marks, not character shapes, and carry no personal evidence.
+CORRECTIONS = {
+    "single": "M .02 .45 C .78 .55 1.15 .31 1.94 .47 C 2.61 .62 3.21 .43 3.93 .58",
+    "double": "M .05 .66 C 1.02 .53 1.84 .75 2.62 .52 L 3.84 .61 M 3.94 .27 C 2.99 .41 2.02 .22 1.27 .41 L .01 .33",
+}
+
 
 def parse_path(description: str) -> list[dict]:
     tokens = re.findall(r"[MLCZ]|[-+]?(?:\d+(?:\.\d*)?|\.\d+)", description)
@@ -202,6 +209,10 @@ def build_profile() -> dict:
     glyphs += [glyph(char, "math.function", path) for char, path in letters.items()]
     glyphs += [glyph(char, "math.digit", path) for char, path in DIGITS.items()]
     glyphs += [glyph(char, "math.operator", path) for char, path in marks.items()]
+    for name, path in CORRECTIONS.items():
+        correction = glyph("−", "mark.correction", path)
+        correction.update(glyph_id=f"synthetic.mark.correction.crossout.{name}", text="crossout")
+        glyphs.append(correction)
     return {
         "schema_version": "1.0", "profile_id": "synthetic-demo", "profile_version": "1.0.0",
         "display_name": "Inkform synthetic educational strokes", "synthetic": True,

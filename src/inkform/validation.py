@@ -354,10 +354,13 @@ def _check_content_accounting(manifest: dict, instances: list, report: dict) -> 
         report["checks"]["content_accounted_for"] = "not_checked"
         return
     start_errors = len(report["errors"])
+    semantic = [item for item in instances if item.get("semantic", True) is not False]
+    if any("semantic" in item and not isinstance(item["semantic"], bool) for item in instances):
+        _issue(report, "invalid_semantic_flag", "Instance semantic flags must be booleans.")
     if (not isinstance(required_count, int) or isinstance(required_count, bool)
             or not isinstance(rendered_count, int) or isinstance(rendered_count, bool)
-            or required_count != len(instances) or rendered_count != len(instances)):
-        _issue(report, "symbol_count_mismatch", "Required and rendered symbol counts must match the actual instance count.")
+            or required_count != len(semantic) or rendered_count != len(semantic)):
+        _issue(report, "symbol_count_mismatch", "Required and rendered symbol counts must match the semantic instance count.")
     try:
         ids = [instance["token_id"] for instance in instances]
         if len(set(ids)) != len(ids):
@@ -370,13 +373,14 @@ def _check_content_accounting(manifest: dict, instances: list, report: dict) -> 
             if not all(isinstance(value, str) and value for value in key) or key in expected or not isinstance(count, int) or isinstance(count, bool) or count <= 0:
                 raise ValueError("coverage inventory contains invalid or duplicate symbol records")
             expected[key] = count
-        actual = Counter((instance["role"], instance["text"]) for instance in instances)
+        actual = Counter((instance["role"], instance["text"]) for instance in semantic)
         if actual != expected:
             _issue(report, "symbol_inventory_mismatch", "Rendered roles and symbols differ from the required inventory.",
                    missing=[{"role": r, "text": t, "count": n} for (r, t), n in (expected-actual).items()],
                    unexpected=[{"role": r, "text": t, "count": n} for (r, t), n in (actual-expected).items()])
     except (KeyError, TypeError, ValueError) as exc:
         _issue(report, "invalid_content_inventory", "Could not verify role-aware content accounting.", reason=str(exc))
+    _check_correction_accounting(manifest, instances, report)
     geometry_hash = manifest.get("geometry_hash")
     if geometry_hash is not None:
         try:
@@ -387,7 +391,63 @@ def _check_content_accounting(manifest: dict, instances: list, report: dict) -> 
             _issue(report, "invalid_instance_hash_input", "Instance geometry is not finite JSON data.")
     report["checks"]["content_accounted_for"] = ("fail" if len(report["errors"]) != start_errors else
         "pass_with_declared_missing_input" if manifest.get("unresolved_inputs") else "pass")
-    report["content_accounting_scope"] = "Manifest symbol inventory, unique token IDs, counts, and instance hash when supplied; source transcription and mathematical truth are not inferred."
+    report["content_accounting_scope"] = "Semantic symbol inventory, declared deleted text and correction marks, unique token IDs, counts, and instance hash when supplied; source transcription and mathematical truth are not inferred."
+
+
+def _check_correction_accounting(manifest: dict, instances: list, report: dict) -> None:
+    """Every extra ink token must belong to a declared, internally exact edit."""
+    from .document import clusters
+
+    auxiliary = [item for item in instances if item.get("semantic", True) is False]
+    records = manifest.get("corrections", [])
+    if not auxiliary and not records:
+        return
+    try:
+        if not isinstance(records, list) or not records:
+            raise ValueError("nonsemantic ink needs correction records")
+        if manifest.get("visible_symbol_count") != len(instances):
+            raise ValueError("visible_symbol_count must include deleted text and marks")
+        by_token = {item["token_id"]: item for item in instances}
+        used_tokens, edit_ids = set(), set()
+        declared_auxiliary = set()
+        for record in records:
+            identity = record["id"]
+            if not isinstance(identity, str) or not identity or identity in edit_ids:
+                raise ValueError("correction IDs must be nonempty and unique")
+            edit_ids.add(identity)
+            if record["kind"] not in {"explicit", "sampled_restart"}:
+                raise ValueError("unsupported correction kind")
+            if not isinstance(record["deleted"], str) or not record["deleted"].strip() or not isinstance(record["replacement"], str):
+                raise ValueError("corrections need deleted text and a replacement string")
+            if record["kind"] == "sampled_restart" and record["deleted"] != record["replacement"]:
+                raise ValueError("sampled restarts must repeat the intended word")
+            for part in ("deleted", "mark", "replacement"):
+                tokens = record[part + "_token_ids"]
+                if not isinstance(tokens, list) or not all(isinstance(t, str) for t in tokens):
+                    raise ValueError("correction token lists must be arrays of strings")
+                if len(set(tokens)) != len(tokens) or used_tokens.intersection(tokens):
+                    raise ValueError("correction token lists must be disjoint")
+                used_tokens.update(tokens)
+                items = [by_token[token] for token in tokens]
+                if any(item.get("correction_id") != identity or item.get("correction_part") != part
+                       or (item.get("semantic", True) is False) != (part != "replacement") for item in items):
+                    raise ValueError("correction token flags do not match their ledger")
+                if part != "replacement":
+                    declared_auxiliary.update(tokens)
+                if part == "mark":
+                    if not items or any(item["role"] != "mark.correction" or item["text"] != "crossout"
+                        or item["glyph_id"] != record["glyph_id"] or item.get("source_refs") != record["source_refs"] for item in items):
+                        raise ValueError("each correction needs its declared sampled mark")
+                else:
+                    expected = [c for c in clusters(record["deleted" if part == "deleted" else "replacement"]) if not c.isspace()]
+                    if [item["text"] for item in items] != expected or any(item["role"] != "text" for item in items):
+                        raise ValueError("correction text does not match its visible glyphs")
+        if declared_auxiliary != {item["token_id"] for item in auxiliary}:
+            raise ValueError("undeclared or missing nonsemantic ink")
+        if {item["token_id"] for item in instances if "correction_id" in item} != used_tokens:
+            raise ValueError("undeclared correction references")
+    except (KeyError, TypeError, ValueError) as exc:
+        _issue(report, "invalid_correction_inventory", "Could not account for correction ink.", reason=str(exc))
 
 
 def _render_pages(pdf_path: Path, preview_dir: Path | None, report: dict, margins: dict | None,

@@ -21,18 +21,17 @@ layout contract. No synthetic profile receives learned metric updates.
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 import math
 from collections import defaultdict
 from statistics import median
 
 import numpy as np
 
-from .profiles import accepted_glyphs, validate_profile
+from .profiles import (accepted_glyphs, glyph_evidence_key, independent_frequency_observations,
+                       reviewed_actor, validate_profile)
 
 
-MEASUREMENT_VERSION = "inkform-style-1"
+MEASUREMENT_VERSION = "inkform-style-2"
 _BODY_LETTERS = frozenset("acemnorsuvwxz")
 _ASCENDERS = frozenset("bdfhklt")
 _DESCENDERS = frozenset("gjpqy")
@@ -55,21 +54,7 @@ def _stats(values, units: str, *, basis: str) -> dict:
 
 
 def _evidence_key(glyph: dict, observations: dict) -> tuple:
-    refs = glyph.get("source_refs", [])
-    identities = []
-    for ref in refs:
-        observation_id = ref.get("observation_id")
-        if observation_id:
-            observation = observations.get(observation_id, {})
-            # Two representations or aliases of one mask are one observation.
-            identities.append(("mask", observation["mask_sha256"]) if observation.get("mask_sha256")
-                              else (ref["source_id"], observation_id))
-    if identities:
-        return tuple(sorted(set(identities)))
-    # Older profiles may link only a source page. Do not collapse every letter
-    # on that page into one sample; deduplicate exact geometry aliases instead.
-    digest = hashlib.sha256(json.dumps(glyph["strokes"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return ("geometry_record", digest)
+    return glyph_evidence_key(glyph, observations)
 
 
 def _roots(coefficients):
@@ -156,7 +141,7 @@ def _word_gaps(observations: list[dict]) -> tuple[list[dict], dict]:
         if observation.get("kind", observation.get("type")) != "word":
             continue
         if (observation.get("label_status") != "reviewed" or observation.get("layout_status") != "reviewed"
-                or not isinstance(observation.get("reviewed_by"), str) or not observation["reviewed_by"].strip()):
+                or not reviewed_actor(observation.get("reviewed_by"))):
             excluded["unreviewed_layout_or_label"] += 1
             continue
         box, xheight = observation.get("bbox_xywh"), observation.get("xheight_px")
@@ -200,6 +185,51 @@ def _word_gaps(observations: list[dict]) -> tuple[list[dict], dict]:
                             "left_observation_id": left["observation_id"], "right_observation_id": right["observation_id"],
                             "gap_xheight": gap / median((left["xheight_px"], right["xheight_px"]))})
     return records, dict(excluded)
+
+
+def _relative_spread(values: list[float], maximum: float) -> float:
+    """A capped robust relative spread, never a claim of captured pen motion."""
+    center = median(values)
+    if center <= 1e-9 or len(values) < 2:
+        return 0.
+    return min(maximum, 1.4826 * median(abs(value-center) for value in values) / center)
+
+
+def _variation_update(profile, grouped, observations, gaps, line_count):
+    if profile["synthetic"]:
+        return None
+    forms = []
+    for (role, text), variants in sorted(grouped.items()):
+        # Old geometry-only records may still be rendered and summarized, but
+        # differing representations cannot establish independent captures.
+        supported = [glyph for glyph, _ in variants if glyph["source_refs"]
+                     and all(ref.get("observation_id") in observations for ref in glyph["source_refs"])]
+        if len(supported) < 2 or role == "mark.correction":
+            continue
+        forms.append({"role": role, "text": text,
+            "width": _relative_spread([g["ink_bounds"][2]-g["ink_bounds"][0] for g in supported], .15),
+            "height": _relative_spread([g["ink_bounds"][3]-g["ink_bounds"][1] for g in supported], .12),
+            "source_count": len(supported), "glyph_ids": [g["glyph_id"] for g in supported],
+            "observation_ids": sorted({ref["observation_id"] for glyph in supported for ref in glyph["source_refs"]})})
+    supported_gaps = gaps if len(gaps) >= 3 and line_count >= 2 else []
+    if not forms and not supported_gaps:
+        return None
+    return {"version": "inkform-variation-1", "basis": "reviewed_samples", "by_glyph": forms,
+        "word_gap": _relative_spread([gap["gap_xheight"] for gap in supported_gaps], .25) if supported_gaps else 0.,
+        "word_gap_sample_count": len(supported_gaps),
+        "word_gap_observation_ids": sorted({gap[key] for gap in supported_gaps for key in ("left_observation_id", "right_observation_id")})}
+
+
+def _correction_update(profile):
+    observations, exclusions = independent_frequency_observations(profile)
+    if profile["synthetic"] or not observations:
+        return None, exclusions
+    words = sum(observation["word_count"] for observation in observations)
+    corrected = sum(observation["correction_count"] for observation in observations)
+    return {"rate": min(.35, corrected/words), "basis": "reviewed_samples",
+        "sampled_word_count": words, "correction_count": corrected,
+        "observation_ids": [observation["observation_id"] for observation in observations],
+        "source_refs": [{"source_id": observation["source_id"], "observation_id": observation["observation_id"]} for observation in observations]}, exclusions
 
 
 def measure_style(profile: dict) -> dict:
@@ -277,10 +307,17 @@ def measure_style(profile: dict) -> dict:
         uncertainties.append("Some forms lack observation IDs; their deduplication uses exact geometry and cannot establish independent capture counts.")
     if profile["synthetic"]:
         uncertainties.append("This is synthetic demonstration geometry, not learned personal handwriting; no learned metrics are proposed.")
+    variation = _variation_update(profile, grouped, observations, gaps, line_count)
+    corrections, correction_exclusions = _correction_update(profile)
+    if variation:
+        uncertainties.append("Occurrence variation is a bounded synthesis from reviewed form spread; it does not recover pen movement or a complete handwriting distribution.")
+    if corrections is None:
+        uncertainties.append("No correction habit is inferred without reviewed counts of all words and corrected words in representative source pages or regions.")
     return {"version": MEASUREMENT_VERSION, "synthetic": profile["synthetic"], "measurements": measurements,
             "accepted_glyph_records": len(accepted), "unique_letter_form_samples": len(glyphs),
             "form_geometry": forms, "word_gap_samples": gaps, "word_gap_exclusions": exclusions,
             "metric_updates": updates, "metric_update_evidence": evidence, "retained_metrics": copy.deepcopy(profile["metrics"]),
+            "variation_update": variation, "correction_update": corrections, "correction_frequency_exclusions": correction_exclusions,
             "physical_scale": {"inferred_from_images": False, "retained": copy.deepcopy(profile["physical_scale"]),
                                "requirement": "Known physical source calibration or an explicit user-selected writing size is required; image pixel dimensions alone provide no millimeter scale."},
             "uncertainties": uncertainties}

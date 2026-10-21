@@ -9,10 +9,11 @@ import html
 import json
 from pathlib import Path
 
-from inkform.document import literal_document
+from inkform.document import literal_document, load_document
 from inkform.layout import plan_document
 from inkform.profiles import load_profile
 from inkform.rendering import export_pdf
+from inkform.validation import check_pdf
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -47,20 +48,31 @@ def svg(plan, title, color):
     return "\n".join(output + ["</g>", "</svg>", ""])
 
 
-note = literal_document("make room for\nsmall thoughts.\n\nkeep the shape.\nwrite something new.\n\none page at a time.", "inkform-site-specimen")
+note = literal_document("make room for\nsmall changes.\n\n", "inkform-site-specimen")
+note["blocks"][0]["children"] += [
+    {"id": "note-edit", "type": "correction", "deleted": "perfect", "text": "personal"},
+    {"id": "note-ending", "type": "text", "text": "\nwrite something new.\n\none page at a time."},
+]
 note["page"] = {"width_mm": 120, "height_mm": 145, "margins_mm": 5, "body_x_height_mm": 5.0}
 note_plan = plan_document(note, profile, seed=72, mode="fresh_strokes")
 (ASSETS / "handwriting.svg").write_text(svg(note_plan, "Synthetic handwriting specimen", profile["pen"]["color"]))
 
-expression = {"type": "relation", "operator": "=", "left": {"type": "limit", "variable": "x", "approaches": {"type": "number", "value": "2"}, "direction": "left", "body": {"type": "function_call", "name": "f", "arguments": [{"type": "symbol", "value": "x"}]}}, "right": {"type": "fraction", "numerator": {"type": "number", "value": "1"}, "denominator": {"type": "number", "value": "2"}}}
-math_document = {"schema_version": "1.0", "document_id": "inkform-site-math", "content_mode": "literal", "page": {"width_mm": 150, "height_mm": 62, "margins_mm": 8, "body_x_height_mm": 8}, "blocks": [{"id": "formula", "type": "display_math", "expression": expression}], "unresolved_inputs": []}
+demo = load_document(ROOT / "examples" / "corrections.json")
+math_examples = [copy.deepcopy(block["expression"]) for block in demo["blocks"] if block["type"] == "display_math"]
+expression = {"type": "row", "items": []}
+for example in math_examples:
+    if expression["items"]:
+        expression["items"].append({"type": "symbol", "value": ";", "role": "math.operator"})
+    expression["items"].append(example)
+math_document = {"schema_version": "1.0", "document_id": "inkform-site-math", "content_mode": "literal", "page": {"width_mm": 180, "height_mm": 62, "margins_mm": 8, "body_x_height_mm": 5.8}, "blocks": [{"id": "formula", "type": "display_math", "expression": expression}], "unresolved_inputs": []}
 math_plan = plan_document(math_document, profile, seed=72, mode="fresh_strokes")
-(ASSETS / "mathematics.svg").write_text(svg(math_plan, "Synthetic limit and fraction specimen", "#f4f0e7"))
+(ASSETS / "mathematics.svg").write_text(svg(math_plan, "Three synthetic limits with varied arrows and preserved directions", "#f4f0e7"))
 
-demo = literal_document("Inkform\nPersonal forms. Fresh ink.\n\nThis is an authored synthetic demonstration.\nA real writer profile begins with your own samples.\n\nKeep the shape. Write something new.\n\n", "inkform-open-source-demo")
-demo["blocks"].append({"id": "math-example", "type": "display_math", "expression": copy.deepcopy(expression)})
-demo["blocks"].append({"id": "footer", "type": "paragraph", "children": [{"id": "footer-text", "type": "text", "text": "\nPrint this vector PDF at Actual Size / 100%.\nThe public demonstration contains no personal handwriting."}]})
-demo["page"] = {"width_mm": 210, "height_mm": 297, "margins_mm": 22, "body_x_height_mm": 3.4}
 plan = plan_document(demo, profile, seed=72, mode="fresh_strokes")
+assert note_plan["page_count"] == math_plan["page_count"] == plan["page_count"] == 1
 export_pdf(plan, profile, ASSETS / "inkform-synthetic-demo.pdf", "Inkform — authored synthetic demonstration")
-(ASSETS / "demo-provenance.json").write_text(json.dumps({"source": "examples/synthetic-profile.json", "synthetic": True, "personal_sources": 0, "seed": 72, "representation": "centerline", "pen_width_mm": .38, "width_profile": "constant", "artifacts": ["handwriting.svg", "mathematics.svg", "inkform-synthetic-demo.pdf"]}, indent=2) + "\n")
+preview_dir = ROOT / "build" / "public-demo-preview"
+report = check_pdf(ASSETS / "inkform-synthetic-demo.pdf", plan, preview_dir, preview_dpi=150)
+assert report["ok"], report
+(preview_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+(ASSETS / "demo-provenance.json").write_text(json.dumps({"source": "examples/synthetic-profile.json", "document": "examples/corrections.json", "synthetic": True, "personal_sources": 0, "seed": 72, "representation": "centerline", "pen_width_mm": .38, "width_profile": "constant", "variation": {"amount": .1, "basis": "conservative_estimate"}, "corrections": "explicit authored examples; no fabricated sample habit", "geometry_hash": plan["geometry_hash"], "artifacts": ["handwriting.svg", "mathematics.svg", "inkform-synthetic-demo.pdf"]}, indent=2) + "\n")

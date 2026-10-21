@@ -19,11 +19,11 @@ from scipy import ndimage
 
 from .geometry import GEOMETRY_VERSION, reconstruct_geometry
 from .ingest import _copy_evidence, _open_oriented, _private_root, _profile, _write_json, sha256_file, write_contact_sheets
-from .profiles import ROLES, merge_profile, validate_profile
+from .profiles import ROLES, merge_profile, reviewed_actor, validate_profile
 from .smoothing import SMOOTHING_VERSION, smooth_outline_glyph
 
 
-OBSERVATION_IMPORT_VERSION = "inkform-observation-import-1"
+OBSERVATION_IMPORT_VERSION = "inkform-observation-import-2"
 
 
 def _digest(value) -> str:
@@ -80,6 +80,82 @@ def _crop_alpha(image: Image.Image, bbox: list[int], xheight: float) -> np.ndarr
     return np.clip((crop-6) / (upper-6) * 255, 0, 255).astype(np.uint8)
 
 
+def _source(manifest, row, sources, images):
+    source = _resolve(manifest, row.get("source_path"))
+    source_sha, preserved = _copy_evidence(source, "originals")
+    source_id = "source-"+source_sha[:24]
+    if source_sha not in images:
+        images[source_sha] = _open_oriented(source)
+    image, orientation = images[source_sha]
+    sources[source_id] = {"source_id": source_id, "sha256": source_sha, "kind": "photo",
+        "source_path": str(preserved), "original_path": str(source), "synthetic": False,
+        "oriented_size": list(image.size), "orientation": orientation,
+        "preservation": "original bytes preserved; crop coordinates use EXIF-oriented image"}
+    return source_id, source_sha, image
+
+
+def _integer(row, field, minimum=0):
+    value = row.get(field)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise ValueError(f"Observation {field} must be an integer >= {minimum}")
+    return value
+
+
+def _style_observation(manifest, row, identity, sources, images, manifest_sha):
+    """Preserve explicit source layout/count review; never infer it from crops."""
+    kind = row.get("kind")
+    if row.get("synthetic", False) is not False:
+        raise ValueError("Synthetic observations cannot be imported as personal sample evidence")
+    if kind not in {"word", "correction_frequency"}:
+        raise ValueError("Style observations must have kind word or correction_frequency")
+    source_id, source_sha, image = _source(manifest, row, sources, images)
+    bbox = _bbox(row, image.size)
+    page = _integer(row, "page_index")
+    status_fields = ("label_status", "layout_status") if kind == "word" else ("review_status",)
+    statuses = {field: row.get(field, "proposed") for field in status_fields}
+    if any(status not in {"reviewed", "proposed", "rejected"} for status in statuses.values()):
+        raise ValueError("Style review statuses must be reviewed, proposed, or rejected")
+    reviewed = "reviewed" in statuses.values()
+    actor = row.get("reviewed_by")
+    if reviewed and not reviewed_actor(actor):
+        raise ValueError("Reviewed style observations must identify reviewed_by")
+    if (reviewed or "source_sha256" in row) and row.get("source_sha256") != source_sha:
+        raise ValueError("Reviewed style observations require source_sha256 matching the exact original image bytes")
+    observation = {"kind": kind, "source_id": source_id, "source_sha256": source_sha,
+        "manifest_observation_id": identity, "manifest_sha256": manifest_sha, "page_index": page,
+        "reviewed_by": actor if reviewed else None, "synthetic": False, **statuses}
+    if bbox is not None:
+        observation["bbox_xywh"] = bbox
+    if kind == "word":
+        if bbox is None:
+            raise ValueError("Word layout observations require bbox_xywh")
+        observation["xheight_px"] = _measurement(row, "xheight_px", positive=True)
+        observation["word_index"] = _integer(row, "word_index")
+        for field, default in (("line_id", None), ("column_id", "body")):
+            value = row.get(field, default)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Word layout observations require a nonempty {field}")
+            observation[field] = value
+    else:
+        scope = row.get("scope")
+        if scope not in {"page", "region"}:
+            raise ValueError("Correction frequency scope must be page or region")
+        if scope == "region" and bbox is None:
+            raise ValueError("Correction frequency regions require bbox_xywh")
+        if scope == "page" and bbox is not None and bbox != [0, 0, image.width, image.height]:
+            raise ValueError("Page frequency counts cover the complete page; use region for a cropped area")
+        if not isinstance(row.get("representative"), bool):
+            raise ValueError("Correction frequency observations must explicitly declare representative")
+        words, corrections = _integer(row, "word_count", 1), _integer(row, "correction_count")
+        if corrections > words:
+            raise ValueError("Count corrected words once within the complete sampled word count")
+        observation.update(scope=scope, representative=row["representative"], word_count=words, correction_count=corrections)
+    # Source pixels and measurements identify the evidence; changing either
+    # cannot silently overwrite an earlier count under the same stored ID.
+    observation["observation_id"] = "style-"+_digest(observation)[:24]
+    return observation
+
+
 def import_observations(manifest_path: Path, base_profile: dict | None = None,
                         profile_id: str = "personal-default") -> dict:
     """Import explicit labels/crops and propose both supported representations.
@@ -92,6 +168,12 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("schema_version") != "1.0" or not isinstance(manifest.get("observations"), list):
         raise ValueError("Observation manifest requires schema_version '1.0' and an observations array")
+    if not isinstance(manifest.get("style_observations", []), list):
+        raise ValueError("style_observations must be an array")
+    if manifest.get("synthetic", False) is not False:
+        raise ValueError("Synthetic manifests cannot be imported as personal training evidence")
+    if base_profile and base_profile["synthetic"]:
+        raise ValueError("Personal sample imports cannot be merged into a synthetic demonstration profile")
     profile = _profile(base_profile["profile_id"] if base_profile else profile_id)
     if base_profile:
         for field in ("physical_scale", "pen", "metrics"):
@@ -104,32 +186,26 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
     for row in manifest["observations"]:
         if not isinstance(row, dict):
             raise ValueError("Each observation must be an object")
+        if row.get("synthetic", False) is not False:
+            raise ValueError("Synthetic observations cannot be imported as personal sample evidence")
         identity = row.get("id")
         if not isinstance(identity, str) or not identity or identity in identifiers:
             raise ValueError("Observation IDs must be nonempty and unique within a manifest")
         identifiers.add(identity)
         text, role = row.get("text"), row.get("role")
-        if not isinstance(text, str) or len(text) != 1 or role not in ROLES:
+        correction_mark = role == "mark.correction" and text == "crossout"
+        if not isinstance(text, str) or (len(text) != 1 and not correction_mark) or role not in ROLES or (role == "mark.correction" and not correction_mark):
             raise ValueError("A glyph observation requires one Unicode character and an explicit supported role")
         label_status = row.get("label_status", "proposed")
         if label_status not in {"reviewed", "proposed", "rejected"}:
             raise ValueError("label_status must be reviewed, proposed, or rejected")
         actor = row.get("reviewed_by")
-        if label_status == "reviewed" and (not isinstance(actor, str) or not actor.strip()):
+        if label_status == "reviewed" and not reviewed_actor(actor):
             raise ValueError("Reviewed labels must identify reviewed_by")
         baseline = _measurement(row, "baseline_px")
         xheight = _measurement(row, "xheight_px", positive=True)
-        source = _resolve(manifest_path, row.get("source_path"))
-        source_sha, preserved_source = _copy_evidence(source, "originals")
-        source_id = "source-"+source_sha[:24]
-        if source_sha not in images:
-            images[source_sha] = _open_oriented(source)
-        image, orientation = images[source_sha]
+        source_id, source_sha, image = _source(manifest_path, row, sources, images)
         bbox = _bbox(row, image.size)
-        sources[source_id] = {"source_id": source_id, "sha256": source_sha, "kind": "photo",
-            "source_path": str(preserved_source), "original_path": str(source),
-            "oriented_size": list(image.size), "orientation": orientation,
-            "preservation": "original bytes preserved; crop coordinates use EXIF-oriented image"}
         if row.get("mask_path"):
             mask_source = _resolve(manifest_path, row["mask_path"])
             mask_input_sha, _ = _copy_evidence(mask_source, "provided-masks")
@@ -170,9 +246,10 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
             "preprocessing": method, "manifest_sha256": manifest_sha,
             "measurement_status": "caller-supplied local baseline and x-height; not physical millimeters"}
         observations.append(observation)
-        for representation in ("clean_outline", "centerline"):
+        for representation in (("centerline",) if correction_mark else ("clean_outline", "centerline")):
             geometry = reconstruct_geometry(alpha, baseline, xheight, representation)
-            glyph = {"glyph_id": f"{observation_id}.{role}.{ord(text):04x}.{representation}",
+            label_key = "crossout" if correction_mark else f"{ord(text):04x}"
+            glyph = {"glyph_id": f"{observation_id}.{role}.{label_key}.{representation}",
                 "text": text, "role": role, **geometry,
                 "source_refs": [{"source_id": source_id, "observation_id": observation_id}],
                 "label_status": label_status, "geometry_status": "proposed",
@@ -192,8 +269,17 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
                 "mask_sha256": mask_sha, "geometry_sha256": glyph["geometry_sha256"],
                 "source_path": str(crop_path), "baseline_px": baseline, "xheight_px": xheight,
                 "geometry": glyph, "geometry_status": "proposed"})
+    for row in manifest.get("style_observations", []):
+        if not isinstance(row, dict):
+            raise ValueError("Each style observation must be an object")
+        identity = row.get("id")
+        if not isinstance(identity, str) or not identity or identity in identifiers:
+            raise ValueError("Observation IDs must be nonempty and unique within a manifest")
+        identifiers.add(identity)
+        observations.append(_style_observation(manifest_path, row, identity, sources, images, manifest_sha))
     key = _digest({"importer": OBSERVATION_IMPORT_VERSION, "geometry": GEOMETRY_VERSION,
-        "smoothing": SMOOTHING_VERSION, "candidates": [(r["candidate_id"], r["mask_sha256"], r["geometry_sha256"]) for r in records]})
+        "smoothing": SMOOTHING_VERSION, "candidates": [(r["candidate_id"], r["mask_sha256"], r["geometry_sha256"]) for r in records],
+        "style_only": [observation["observation_id"] for observation in observations] if not records else []})
     build = _private_root() / ("observations-"+key[:20])
     build.mkdir(parents=True, exist_ok=True, mode=0o700)
     review_path = build / "review.json"
@@ -203,7 +289,7 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
         decision = reviews.get(record["candidate_id"], {})
         valid = decision.get("mask_sha256") == record["mask_sha256"] and decision.get("geometry_sha256") == record["geometry_sha256"]
         reviewer = decision.get("reviewed_by")
-        if valid and isinstance(reviewer, str) and reviewer.strip():
+        if valid and reviewed_actor(reviewer):
             if decision.get("geometry_status") in {"reviewed", "rejected"}:
                 glyph["geometry_status"] = decision["geometry_status"]
             if decision.get("label_status") == "reviewed" and glyph["label_status"] != "rejected":
@@ -218,10 +304,12 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
     profile["calibration_status"] = "pending_user_feedback" if reviewed else "unreviewed"
     profile["import_report"] = {"method": OBSERVATION_IMPORT_VERSION, "source_count": len(sources),
         "observation_count": len(observations), "glyph_count": len(records), "accepted_glyph_count": reviewed,
+        "style_observation_count": sum(observation["kind"] != "glyph" for observation in observations),
         "review_required": reviewed < len(records), "review_directory": str(build), "review_path": str(review_path),
         "manifest_sha256": manifest_sha, "source_path": str(manifest_copy),
         "smoothing_failures": [r["candidate_id"] for r in records if "refinement_warning" in r["geometry"]]}
     _write_json(build / "candidates.json", {"algorithm": OBSERVATION_IMPORT_VERSION, "candidates": records})
+    _write_json(build / "style-observations.json", {"observations": [observation for observation in observations if observation["kind"] != "glyph"]})
     if not review_path.exists():
         _write_json(review_path, {"instructions": "Approve only after comparing source and geometry; each decision requires both exact hashes and reviewed_by.", "reviews": {}})
     # Give each representation a distinct contact-sheet label while retaining

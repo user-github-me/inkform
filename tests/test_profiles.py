@@ -283,3 +283,97 @@ def test_invalid_explicit_render_mode_has_actionable_error(profile, mode):
     with pytest.raises(InkformError) as error:
         resolve_render_mode(profile, mode)
     assert error.value.code == "invalid_mode"
+
+
+@pytest.mark.parametrize("amount", [-.1, .31, float("nan"), float("inf"), "0.1", True])
+def test_variation_amount_requires_a_bounded_finite_number(profile, amount):
+    profile["variation"] = {"amount": amount}
+    with pytest.raises(InkformError) as error:
+        validate_profile(profile)
+    assert error.value.code == "invalid_profile"
+
+
+def test_synthetic_profile_can_author_demo_rate_but_cannot_claim_personal_learning(profile):
+    profile["corrections"] = {"rate": .1, "basis": "synthetic_demo", "sampled_word_count": 100,
+        "correction_count": 10, "observation_ids": [], "source_refs": []}
+    validate_profile(profile)
+    profile["corrections"]["basis"] = "reviewed_samples"
+    with pytest.raises(InkformError):
+        validate_profile(profile)
+    profile.pop("corrections")
+    profile["variation"] = {"learned": {"version": "inkform-variation-1", "basis": "reviewed_samples",
+        "by_glyph": [], "word_gap": 0, "word_gap_sample_count": 0, "word_gap_observation_ids": []}}
+    with pytest.raises(InkformError):
+        validate_profile(profile)
+
+
+def personal_frequency_profile(profile):
+    profile["synthetic"] = False
+    profile["sources"] = [{"source_id": "page", "sha256": "a"*64}]
+    profile["glyphs"][0]["source_refs"] = [{"source_id": "page"}]
+    profile["observations"] = [{"observation_id": "page-count", "source_id": "page", "source_sha256": "a"*64,
+        "kind": "correction_frequency", "page_index": 0, "scope": "page", "representative": True,
+        "word_count": 100, "correction_count": 7, "review_status": "reviewed", "reviewed_by": "fixture-author"}]
+    profile["corrections"] = {"rate": .07, "basis": "reviewed_samples", "sampled_word_count": 100,
+        "correction_count": 7, "observation_ids": ["page-count"],
+        "source_refs": [{"source_id": "page", "observation_id": "page-count"}]}
+    return profile
+
+
+@pytest.mark.parametrize("field,value", [
+    ("reviewed_by", "unknown"), ("source_id", "missing"), ("source_sha256", "b"*64),
+    ("review_status", "proposed"), ("representative", False), ("word_count", 0),
+    ("correction_count", 101), ("correction_count", float("nan")),
+])
+def test_learned_rates_reject_missing_unreviewed_or_invalid_evidence(profile, field, value):
+    personal_frequency_profile(profile)
+    validate_profile(profile)
+    profile["observations"][0][field] = value
+    with pytest.raises(InkformError):
+        validate_profile(profile)
+
+
+def test_learned_rate_cannot_change_counts_or_duplicate_one_page(profile):
+    personal_frequency_profile(profile)
+    profile["corrections"]["rate"] = .1
+    with pytest.raises(InkformError):
+        validate_profile(profile)
+    profile["corrections"]["rate"] = .07
+    duplicate = copy.deepcopy(profile["observations"][0])
+    duplicate["observation_id"] = "page-alias"
+    profile["observations"].append(duplicate)
+    profile["corrections"].update(sampled_word_count=200, correction_count=14, observation_ids=["page-count", "page-alias"])
+    profile["corrections"]["source_refs"].append({"source_id": "page", "observation_id": "page-alias"})
+    with pytest.raises(InkformError):
+        validate_profile(profile)
+
+
+def test_synthetic_and_personal_evidence_cannot_be_mixed(profile):
+    with pytest.raises(InkformError):
+        merge_profile(profile, {"synthetic": False})
+    profile["sources"].append({"source_id": "personal", "synthetic": False})
+    with pytest.raises(InkformError):
+        validate_profile(profile)
+
+
+def test_learned_form_evidence_must_match_reviewed_glyphs_and_not_aliases(profile):
+    profile["synthetic"] = False
+    profile["sources"] = [{"source_id": "page"}]
+    profile["observations"] = [{"observation_id": "first", "source_id": "page"}, {"observation_id": "second", "source_id": "page"}]
+    first = profile["glyphs"][0]
+    first["source_refs"] = [{"source_id": "page", "observation_id": "first"}]
+    second = copy.deepcopy(first)
+    second.update(glyph_id="second-x", source_refs=[{"source_id": "page", "observation_id": "second"}])
+    profile["glyphs"].append(second)
+    model = {"role": "text", "text": "x", "width": .1, "height": .02, "source_count": 2,
+        "glyph_ids": [first["glyph_id"], second["glyph_id"]], "observation_ids": ["first", "second"]}
+    profile["variation"] = {"learned": {"version": "inkform-variation-1", "basis": "reviewed_samples",
+        "by_glyph": [model], "word_gap": 0, "word_gap_sample_count": 0, "word_gap_observation_ids": []}}
+    validate_profile(profile)
+    model["glyph_ids"][1] = "missing-glyph"
+    with pytest.raises(InkformError):
+        validate_profile(profile)
+    model["glyph_ids"][1] = second["glyph_id"]
+    second["source_refs"][0]["observation_id"] = "first"
+    with pytest.raises(InkformError):
+        validate_profile(profile)

@@ -14,7 +14,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from .document import clusters, load_document, requirements, validate_document
+from .document import clusters, load_document, validate_document, visible_requirements
 from .errors import InkformError
 from .geometry import geometry_hash
 from .ingest import import_prototype, import_samples
@@ -45,6 +45,8 @@ def _refs(glyph):
 def _merge_evidence(existing: dict, incoming: dict) -> tuple[dict, dict]:
     """Keep representations and revised observations under distinct stable IDs."""
     validate_profile(incoming)
+    if existing["synthetic"] != incoming["synthetic"]:
+        raise InkformError("invalid_profile", "Synthetic demonstration profiles cannot be mixed with personal training evidence.")
     update = {key: copy.deepcopy(incoming.get(key, [])) for key in ("sources", "observations", "glyphs")}
     previous_sources = {item["source_id"]: item for item in existing["sources"]}
     source_aliases = {}
@@ -56,7 +58,8 @@ def _merge_evidence(existing: dict, incoming: dict) -> tuple[dict, dict]:
             source_aliases[original] = source["source_id"]
     previous_observations = {item["observation_id"]: item for item in existing.get("observations", [])}
     observation_aliases = {}
-    measurement_fields = ("source_id", "mask_sha256", "baseline_px", "xheight_px", "bbox_xywh", "source_oriented_size", "normalized_size", "oriented_size", "scale_from_oriented")
+    measurement_fields = ("source_id", "mask_sha256", "baseline_px", "xheight_px", "bbox_xywh", "source_oriented_size", "normalized_size", "oriented_size", "scale_from_oriented",
+                          "kind", "page_index", "line_id", "word_index", "column_id", "scope", "representative", "word_count", "correction_count", "source_sha256")
     for observation in update["observations"]:
         observation["source_id"] = source_aliases.get(observation["source_id"], observation["source_id"])
         old = previous_observations.get(observation["observation_id"])
@@ -97,7 +100,13 @@ def _merge_evidence(existing: dict, incoming: dict) -> tuple[dict, dict]:
             glyph = {**copy.deepcopy(old), **combined}
         retained.append(glyph)
     update["glyphs"] = retained
-    result = merge_profile(existing, update, profile_version=next_profile_version(existing))
+    # Derived models are rebuilt after evidence merging; stale rates must not
+    # survive an updated review/count or prevent a legitimate evidence revision.
+    working = copy.deepcopy(existing)
+    working.get("variation", {}).pop("learned", None)
+    if working.get("corrections", {}).get("basis") == "reviewed_samples":
+        working.pop("corrections")
+    result = merge_profile(working, update, profile_version=next_profile_version(existing))
     return result, {"incoming_glyph_count": len(incoming["glyphs"]), "retained_glyph_count": len(retained), "renamed_glyphs": renamed, "superseded_candidates": superseded}
 
 
@@ -122,7 +131,7 @@ def _readiness(profile, document) -> dict:
     mode = resolve_render_mode(profile)
     representation = "centerline" if mode == "fresh_strokes" else "clean_outline"
     eligible = {**profile, "glyphs": [g for g in profile["glyphs"] if g["representation"] == representation]}
-    cov = coverage(eligible, requirements(document))
+    cov = coverage(eligible, visible_requirements(document))
     unresolved = copy.deepcopy(document.get("unresolved_inputs", []))
     result = {"status": "missing_glyphs" if not cov["complete"] else "coverage_complete", "ready": False, "renderable": False, "content_complete": not unresolved,
               "unresolved_inputs": unresolved, "mode": mode, "coverage": cov,
@@ -141,7 +150,7 @@ def _readiness(profile, document) -> dict:
 def _specimen_document(profile):
     """A coverage-matched specimen, never an invented transcription of samples."""
     representation = "centerline" if resolve_render_mode(profile) == "fresh_strokes" else "clean_outline"
-    glyphs = [g for g in accepted_glyphs(profile) if g["representation"] == representation and len(clusters(g["text"])) == 1 and not g["text"].isspace()]
+    glyphs = [g for g in accepted_glyphs(profile) if g["role"] != "mark.correction" and g["representation"] == representation and len(clusters(g["text"])) == 1 and not g["text"].isspace()]
     blocks = []
     text_forms = sorted({g["text"] for g in glyphs if g["role"] == "text"})
     for offset in range(0, len(text_forms), 20):
@@ -220,6 +229,10 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
     if measurements["metric_updates"]:
         current["metrics"].update(measurements["metric_updates"])
         current["metrics"]["measurement_evidence"] = copy.deepcopy(measurements["metric_update_evidence"])
+    if measurements["variation_update"] is not None:
+        current.setdefault("variation", {})["learned"] = copy.deepcopy(measurements["variation_update"])
+    if measurements["correction_update"] is not None:
+        current["corrections"] = copy.deepcopy(measurements["correction_update"])
     readiness = _readiness(current, target)
     mode = resolve_render_mode(current)
     chosen_representation = "centerline" if mode == "fresh_strokes" else "clean_outline"

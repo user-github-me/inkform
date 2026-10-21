@@ -15,7 +15,7 @@ inkform train --id my-writing --samples ./writing-samples \
   --observations ./reviewed-observations.json
 ```
 
-Review the candidate geometry against the originals. Keep correct characteristic forms and variants; leave doubtful forms proposed. Use smooth outlines when they best preserve the user's ink weight and recognizable shapes. Routine candidate review belongs to the agent; ask the user for extra evidence only when actual missing forms or ambiguous content cannot be resolved.
+Review the candidate geometry against the originals. Keep correct characteristic forms and variants; leave doubtful forms proposed. Retain several independently written instances of common letters and recurring symbols such as limit arrows. Include the normal range of widths, slants, endings, and tidy or hurried forms visible in the supplied pages. Duplicating one crop under several IDs is not evidence of variation. Use smooth outlines when they best preserve the user's ink weight and recognizable shapes. Routine candidate review belongs to the agent; ask the user for extra evidence only when actual missing forms or ambiguous content cannot be resolved.
 
 For an existing legacy collection, `--prototype ./output` reuses its reviewed evidence. A later run loads the current profile and preserves reviewed refinements; it must not replace them with a rougher automatic reconstruction.
 
@@ -36,5 +36,13 @@ A requested calibration document is rendered when the selected profile can cover
 The immutable profile records the calibration plan and its `execution_report_path`. Read that training report for actual export success, errors, and resulting PDF paths; a planned artifact is not proof of a successful export.
 
 Measurements report sample counts, medians, spread, and evidence limits. Keep isolated-glyph advances and body bounds distinct from word spacing observed on real lines. A photo's pixel dimensions do not reveal physical writing size. Preserve a user-selected print size until proper physical-scale evidence is available. Do not relabel estimated pen darkness as pressure.
+
+## Natural variation and corrections
+
+Variation has two sources: choosing genuine reviewed forms, and applying bounded per-occurrence changes around them. Fit the latter from distinct same-character evidence, without pooling unrelated characters into a claimed personal distribution. When evidence is sparse, the renderer uses a conservative estimate and reports that limitation. Check repeated letters and arrows in calibration, not only a passage where every symbol appears once. A fixed seed keeps the comparison repeatable while occurrences within the page can differ.
+
+For spacing, review real word gaps with the corresponding page region and x-height. For crossed-out words, review isolated strike or scribble centerlines separately from the deleted writing. Also inspect a representative passage and record both its total word count and its corrected-word count. Keep the counted region and reviewer with the evidence. A collection of deliberately selected crossed-out words would overstate the habit and must not be used as the denominator.
+
+Automatic sampled corrections require both a reviewed habit and an accepted correction mark. A writer with no observed correction habit receives none. These additions are visible crossed-out restarts of an existing word followed by its intact text; they do not invent incorrect facts or change the supplied answer. Explicitly supplied deletions use the document's correction run instead. Compare the amount and appearance of cross-outs against the original passages, then inspect wrapping and the intact replacement text at print size.
 
 After calibration, save the chosen render mode and user feedback using the versioned update in [profile-format.md](profile-format.md). Run `render requested-document.json --profile my-writing --output notes.pdf` using the same learned profile. The engine checks every needed role and symbol; fill coverage gaps from the existing samples or a short targeted sample before completing that document. A successful PDF export does not itself establish likeness or printed quality: inspect enlarged vector edges and print the PDF at Actual Size / 100%.

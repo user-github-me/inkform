@@ -3,7 +3,7 @@
 The npm package bundles the Python engine, public synthetic examples, and this skill. It requires Node.js 20+. The engine uses Python 3.11 or newer. Installation does not execute setup scripts or upload handwriting.
 
 ```sh
-npm install -g inkform
+npm install -g @nazifbd/inkform
 inkform setup
 inkform skill install
 ```
@@ -12,9 +12,9 @@ inkform skill install
 
 `skill install` copies a self-contained skill to `~/.agents/skills/inkform`. Use `--path /desired/skill/inkform` for another agent's skill directory. This path is the final skill directory. Existing directories are preserved; `--force` replaces only a previous installation bearing Inkform's installation marker. Reload the agent after installation. The skill launcher preserves the caller's working directory, so relative document and output paths work normally.
 
-You can also use `npx --yes inkform setup` and `npx --yes inkform skill install`. The copied skill contains its own runtime, so it does not depend on npm's temporary download directory remaining available. To set it up later, run `node runtime/bin/inkform.mjs setup` from the installed skill directory.
+You can also use `npx --yes @nazifbd/inkform setup` and `npx --yes @nazifbd/inkform skill install`. The npm package is scoped; its executable remains `inkform`. The copied skill contains its own runtime, so it does not depend on npm's temporary download directory remaining available. To set it up later, run `node runtime/bin/inkform.mjs setup` from the installed skill directory.
 
-If this skill was copied alone by a skill manager, install the engine with `npm install -g inkform` followed by `inkform setup`. Copying only `SKILL.md` does not install the engine. macOS and Linux are the primary supported environments; Windows has not been validated.
+If this skill was copied alone by a skill manager, install the engine with `npm install -g @nazifbd/inkform` followed by `inkform setup`. Copying only `SKILL.md` does not install the engine. macOS and Linux are the primary supported environments; Windows has not been validated.
 
 ## Source checkout
 

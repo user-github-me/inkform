@@ -131,7 +131,8 @@ export function installSkill(args) {
     try {
       previous = JSON.parse(readFileSync(join(destination, '.inkform-install.json'), 'utf8'));
       const runtimePackage = JSON.parse(readFileSync(join(destination, 'runtime', 'package.json'), 'utf8'));
-      if (previous.name !== metadata.name || runtimePackage.name !== metadata.name || !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(previous.version) || !/^[a-f0-9]{64}$/.test(previous.fingerprint) || !existsSync(join(destination, 'SKILL.md'))) previous = null;
+      const knownNames = new Set([metadata.name, 'inkform']);
+      if (!knownNames.has(previous.name) || runtimePackage.name !== previous.name || runtimePackage.version !== previous.version || !/^\d+\.\d+\.\d+(?:[-+].*)?$/.test(previous.version) || !/^[a-f0-9]{64}$/.test(previous.fingerprint) || !existsSync(join(destination, 'SKILL.md')) || engineFingerprint(join(destination, 'runtime')) !== previous.fingerprint) previous = null;
     } catch { previous = null; }
     if (!previous) throw new Error('Refusing to replace a directory without a valid Inkform installation marker and runtime. Choose an empty destination.');
     rmSync(destination, { recursive: true });
@@ -162,7 +163,7 @@ function canonicalPath(path) {
 }
 
 function help() {
-  console.log(`Inkform ${metadata.version} — private handwriting profiles and vector PDFs\n\nStart here:\n  inkform setup                    Install the Python engine and dependencies\n  inkform skill install            Install the bundled agent skill\n  inkform examples                 Show the public example directory\n\nHandwriting workflow (after setup):\n  inkform train --id WRITER --samples FOLDER\n  inkform profile coverage WRITER --document note.json\n  inkform render note.json --profile WRITER --output note.pdf\n\nCommands: train, profile, document, render, check, compare\nRun a command with --help for its options.\nTraining requires reviewed observations; importing photos alone does not\ncomplete a handwriting profile. Files stay local.\n\nSetup: inkform setup --help\nSkill: inkform skill install --help\nDocs:  https://github.com/user-github-me/inkform`);
+  console.log(`Inkform ${metadata.version} — private handwriting profiles and vector PDFs\n\nInstall: npm install -g ${metadata.name}\n\nStart here:\n  inkform setup                    Install the Python engine and dependencies\n  inkform skill install            Install the bundled agent skill\n  inkform examples                 Show the public example directory\n\nHandwriting workflow (after setup):\n  inkform train --id WRITER --samples FOLDER\n  inkform profile coverage WRITER --document note.json\n  inkform render note.json --profile WRITER --output note.pdf\n\nCommands: train, profile, document, render, check, compare\nRun a command with --help for its options.\nTraining requires reviewed observations; importing photos alone does not\ncomplete a handwriting profile. Files stay local.\n\nSetup: inkform setup --help\nSkill: inkform skill install --help\nDocs:  https://github.com/user-github-me/inkform`);
 }
 
 export function main(args = process.argv.slice(2)) {

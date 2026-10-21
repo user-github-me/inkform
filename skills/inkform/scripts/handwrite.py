@@ -21,5 +21,5 @@ if bundled.is_file():
 installed = shutil.which("inkform")
 if installed:
     os.execv(installed, [installed, *sys.argv[1:]])
-sys.stderr.write("Inkform needs its engine. Run: npm install -g inkform\nThen: inkform setup\nFor a source checkout, create .venv with Python 3.11+ and run: python -m pip install -e .\nSee references/installation.md.\n")
+sys.stderr.write("Inkform needs its engine. Run: npm install -g @nazifbd/inkform\nThen: inkform setup\nFor a source checkout, create .venv with Python 3.11+ and run: python -m pip install -e .\nSee references/installation.md.\n")
 raise SystemExit(2)

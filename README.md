@@ -2,20 +2,20 @@
 
 **Personal forms. Fresh ink.**
 
-[Introduction](https://user-github-me.github.io/inkform/) · [npm](https://www.npmjs.com/package/inkform) · [Releases](https://github.com/user-github-me/inkform/releases) · [Contribute](https://github.com/user-github-me/inkform/blob/main/CONTRIBUTING.md)
+[Introduction](https://user-github-me.github.io/inkform/) · [npm](https://www.npmjs.com/package/@nazifbd/inkform) · [Releases](https://github.com/user-github-me/inkform/releases) · [Contribute](https://github.com/user-github-me/inkform/blob/main/CONTRIBUTING.md)
 
 Inkform is an open-source Python engine and agent skill for learning reusable private handwriting profiles and producing printable vector PDFs. It fits the writer's own reviewed forms, preserves genuine variants, and keeps text and mathematical roles separate.
 
 This is a working **0.1 implementation**, with a profile importer, reviewed vector geometry, semantic layout, a command-line interface, and actual PDF checks. Personal resemblance and print quality still need calibration. It is not a fully automatic photo-to-handwriting model.
 
-Version 0.1.1 adds sample-first training, portable reviewed observations, smooth cubic outline refinement, and 300 dpi previews. A writer can choose `default_render_mode: clean_outline` to retain fuller, sample-derived forms. An explicit `--mode` overrides that preference. The PDF itself remains vector at every preview resolution.
+Inkform includes sample-first training, portable reviewed observations, smooth cubic outline refinement, and 300 dpi previews. A writer can choose `default_render_mode: clean_outline` to retain fuller, sample-derived forms. An explicit `--mode` overrides that preference. The PDF itself remains vector at every preview resolution.
 
 ## Install with npm
 
 Node.js 20 or newer and Python 3.11 or newer are required. With `uv` installed, setup can provision a compatible Python automatically. Setup downloads dependencies once; handwriting processing runs locally without a cloud account or API key.
 
 ```sh
-npm install -g inkform
+npm install -g @nazifbd/inkform
 inkform setup
 inkform --help
 
@@ -23,7 +23,7 @@ inkform --help
 inkform skill install
 ```
 
-You can also use `npx inkform setup` and `npx inkform skill install`. The installer defaults to `~/.agents/skills/inkform`; use `--path` for your agent's skill directory. It preserves an existing installation unless you explicitly request replacement. See [installation details](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/installation.md).
+You can also use `npx @nazifbd/inkform setup` and `npx @nazifbd/inkform skill install`. The installer defaults to `~/.agents/skills/inkform`; use `--path` for your agent's skill directory. It preserves an existing installation unless you explicitly request replacement. See [installation details](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/installation.md).
 
 The npm package contains the Python engine and skill. It is a launcher and installer, not a browser handwriting model. The Python environment is prepared only by the explicit `setup` command.
 

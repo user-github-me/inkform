@@ -7,6 +7,7 @@ import test from 'node:test';
 import { engineFingerprint, projectRoot, runtimeLocation } from '../../bin/inkform.mjs';
 
 const cli = join(projectRoot, 'bin', 'inkform.mjs');
+const metadata = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'));
 function sandbox(t) {
   const path = mkdtempSync(join(tmpdir(), 'inkform npm test '));
   t.after(() => rmSync(path, { recursive: true, force: true }));
@@ -37,7 +38,7 @@ test('CLI executes through an npm-style symlink', t => {
   symlinkSync(cli, link);
   const result = spawnSync(process.execPath, [link, '--version'], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /^Inkform 0\.1\.1\n$/);
+  assert.equal(result.stdout, `Inkform ${metadata.version}\n`);
 });
 
 test('engine forwarding preserves arguments, cwd, spaces, metacharacters and failure status', t => {
@@ -67,7 +68,7 @@ test('skill installation is self-contained and refuses unrelated overwrites', t 
   assert.equal(engineFingerprint(join(target, 'runtime')), engineFingerprint());
   const standalone = spawnSync(process.execPath, [join(target, 'runtime', 'bin', 'inkform.mjs'), '--version'], { cwd: temporary, encoding: 'utf8' });
   assert.equal(standalone.status, 0, standalone.stderr);
-  assert.match(standalone.stdout, /Inkform 0\.1\.1/);
+  assert.equal(standalone.stdout, `Inkform ${metadata.version}\n`);
   assert.equal(run(['skill', 'install', '--path', target]).status, 1);
   assert.equal(run(['skill', 'install', '--path', target, '--force']).status, 0);
   const unrelated = join(temporary, 'my existing files');
@@ -78,6 +79,22 @@ test('skill installation is self-contained and refuses unrelated overwrites', t 
   writeFileSync(join(unrelated, '.inkform-install.json'), '{}');
   assert.equal(run(['skill', 'install', '--path', unrelated, '--force']).status, 1);
   assert.equal(readFileSync(join(unrelated, 'keep.txt'), 'utf8'), 'keep');
+});
+
+test('scoped skill upgrades a valid legacy unscoped installation', t => {
+  const temporary = sandbox(t);
+  const target = join(temporary, 'legacy skill');
+  assert.equal(run(['skill', 'install', '--path', target]).status, 0);
+  const markerPath = join(target, '.inkform-install.json');
+  const runtimePackagePath = join(target, 'runtime', 'package.json');
+  const marker = JSON.parse(readFileSync(markerPath, 'utf8'));
+  const runtimePackage = JSON.parse(readFileSync(runtimePackagePath, 'utf8'));
+  marker.name = runtimePackage.name = 'inkform';
+  writeFileSync(markerPath, JSON.stringify(marker));
+  writeFileSync(runtimePackagePath, JSON.stringify(runtimePackage));
+  assert.equal(run(['skill', 'install', '--path', target, '--force']).status, 0);
+  assert.equal(JSON.parse(readFileSync(markerPath, 'utf8')).name, '@nazifbd/inkform');
+  assert.equal(JSON.parse(readFileSync(runtimePackagePath, 'utf8')).name, '@nazifbd/inkform');
 });
 
 test('skill destinations cannot recurse into source trees, including through symlinks', t => {

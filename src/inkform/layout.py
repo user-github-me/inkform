@@ -13,7 +13,9 @@ import regex
 from .document import clusters, requirements, validate_document, visible_requirements
 from .errors import InkformError
 from .profiles import accepted_glyphs, coverage, geometry_bounds, resolve_render_mode, validate_profile
-from .variation import OccurrenceVariation, stable_value
+from .variation import (OccurrenceVariation, stable_value, source_family, source_evidence, geometry_family,
+                        contour_topology, interpolate_forms, curved_strokes)
+from .repetition import shape_descriptor, assess_pair, audit_repetition, NEAR_THRESHOLD_MM
 
 
 def map_strokes(strokes, transform):
@@ -65,17 +67,64 @@ def join(boxes, gap=0):
 
 
 class Shaper:
-    def __init__(self, profile, seed, mode, size):
+    def __init__(self, profile, seed, mode, size, nonces=None):
         self.profile, self.seed, self.mode, self.size = profile, seed, mode, size
         self.forms, self.variant_history, self.variant_choices = {}, {}, {}
+        self.history, self.current_page, self.nonces = {}, 0, nonces or {}
+        self.used_families = {}
+        self.observations = {entry["observation_id"]: entry for entry in profile.get("observations", [])}
         self.variation = OccurrenceVariation(profile, seed)
         self.corrections = []
         representation = "centerline" if mode == "fresh_strokes" else "clean_outline"
         for glyph in accepted_glyphs(profile):
             if glyph["representation"] == representation or glyph["role"] == "mark.correction":
                 self.forms.setdefault((glyph["role"], glyph["text"]), []).append(glyph)
-        for forms in self.forms.values():
-            forms.sort(key=lambda form: form["glyph_id"])
+        for key, forms in self.forms.items():
+            # One crop renamed or smoothed three times is still one example.
+            families, shapes, claimed_evidence = {}, set(), {}
+            ordered = sorted(forms, key=lambda form: form["glyph_id"], reverse=True)
+            # Prefer individual observed occurrences over a derivative claiming
+            # several of them. A+B is not a third independent sample beside A/B.
+            ordered.sort(key=lambda form: len(source_evidence(form, self.observations)))
+            for form in ordered:
+                calibration = json.dumps(form.get("outline_calibration", {}), sort_keys=True)
+                family, shape = (source_family(form, self.observations), calibration), (geometry_family(form), calibration)
+                evidence = source_evidence(form, self.observations)
+                claimed = claimed_evidence.setdefault(calibration, set())
+                if family not in families and shape not in shapes and not evidence.intersection(claimed):
+                    families[family] = form
+                    shapes.add(shape)
+                    claimed.update(evidence)
+            self.forms[key] = sorted(families.values(), key=lambda form: form["glyph_id"])
+
+    def commit_page(self, page, items):
+        """Correct provisional occurrence pages after physical line placement."""
+        tokens = {item["token_id"] for item in items}
+        self.current_page = page
+        for key in list(self.history):
+            records = self.history[key]
+            for record in records:
+                if record["token_id"] in tokens:
+                    record["page"] = page
+            self.history[key] = [record for record in records if record["page"] >= page-1]
+            if not self.history[key]:
+                del self.history[key]
+
+    @staticmethod
+    def compatible(first, second):
+        # Outlines need an explicitly reviewed point correspondence before
+        # morphing. Matching contour counts alone cannot protect small counters.
+        if first["representation"] != "centerline" or contour_topology(first) != contour_topology(second):
+            return False
+        # A coincident segment count does not establish matching stroke order.
+        # Only small corresponding displacements permit source interpolation.
+        deltas = []
+        for stroke, peer in zip(first["strokes"], second["strokes"]):
+            pairs = [(stroke["start"], peer["start"])]
+            pairs += [(segment[key], other[key]) for segment, other in zip(stroke["segments"], peer["segments"])
+                      for key in ("end", "control1", "control2") if key in segment]
+            deltas.extend(math.hypot(a[0]-b[0], a[1]-b[1]) for a,b in pairs)
+        return max(deltas, default=0) < .42 and sum(deltas)/max(1,len(deltas)) < .24
 
     def glyph(self, text, role, token_id, size=None, word_id=None, position=0.5):
         size = self.size if size is None else size
@@ -95,26 +144,65 @@ class Shaper:
             forms = [form for form in compatible_size if abs(self.profile["pen"]["width_mm"] - form["outline_calibration"].get("pen_width_mm", form["outline_calibration"].get("effective_width_mm", -1))) <= 0.01]
             if not forms:
                 raise InkformError("outline_pen_incompatible", "Changing the pen model cannot change a filled outline's thickness; select a reviewed compatible variant.", {"role": role, "text": text, "requested_pen_width_mm": self.profile["pen"]["width_mm"]})
-        # History is scoped to the original stable content node. Inserting an
-        # unrelated paragraph cannot change a surviving node's chosen forms.
-        try:
-            context = json.JSONDecoder().raw_decode(token_id)[0]
-        except (ValueError, TypeError):
-            context = word_id or token_id
-        history_key = (str(context), role, text, size)
-        choice_key = (token_id, role, text, size)
-        index = min(len(forms) - 1, int(stable_value(self.seed, token_id, "variant") * len(forms)))
-        previous = self.variant_history.get(history_key)
-        if len(forms) > 1 and forms[index]["glyph_id"] == previous:
-            index = (index + 1 + int(stable_value(self.seed, token_id, "alternate-variant") * (len(forms) - 1))) % len(forms)
-        chosen = self.variant_choices.get(choice_key, forms[index]["glyph_id"])
-        g = next(form for form in forms if form["glyph_id"] == chosen)
-        self.variant_choices[choice_key] = g["glyph_id"]
-        self.variant_history[history_key] = g["glyph_id"]
+        # Ink identity crosses semantic roles: text x and mathematical x
+        # still must not reuse the same visible form on neighboring pages.
+        history_key = text
+        choice_key = (role, text, size)
+        used = self.used_families.setdefault(choice_key, set())
+        candidates = [form for form in forms if source_family(form, self.observations) not in used]
+        if not candidates:
+            used.clear()
+            previous = self.variant_history.get(choice_key)
+            candidates = [form for form in forms if form["glyph_id"] != previous] if len(forms) > 1 else list(forms)
+        start = min(len(candidates)-1, int(stable_value(self.seed, token_id, "variant")*len(candidates)))
+        candidates = candidates[start:] + candidates[:start]
         word_id = word_id or token_id
-        factors = self.variation.factors(g, token_id, word_id, position)
-        strokes = map_strokes(g["strokes"], self.variation.transform(g, factors, size))
-        item = {"token_id": token_id, "glyph_id": g["glyph_id"], "text": text, "role": role, "representation": g["representation"], "strokes": strokes, "pen_width_mm": self.profile["pen"]["width_mm"], "source_refs": copy.deepcopy(g["source_refs"]), "semantic": True, "variation": factors}
+        records = [record for record in self.history.get(history_key, []) if record["token_id"] != token_id]
+        best, best_distance = None, -1
+        # A finite maximin search keeps every attempt inside the approved style
+        # envelope. The final placed-page audit decides whether it is enough.
+        attempts = 1 if self.variation.amount == 0 or not records else 48
+        for trial in range(attempts):
+            source = candidates[trial % len(candidates)]
+            attempt = self.nonces.get(token_id, 0)*48 + trial
+            factors = self.variation.factors(source, token_id, word_id, position,
+                                             attempt=attempt, independent_forms=len(forms))
+            g = source
+            compatible = [peer for peer in forms if peer["glyph_id"] != source["glyph_id"] and self.compatible(source, peer)]
+            refs = copy.deepcopy(source["source_refs"])
+            if compatible and self.variation.amount:
+                peer = compatible[min(len(compatible)-1, int(stable_value(self.seed, f"{token_id}:{attempt}", "blend-form")*len(compatible)))]
+                ratio = .12 + .38*stable_value(self.seed, f"{token_id}:{attempt}", "blend-ratio")
+                g = interpolate_forms(source, peer, ratio)
+                factors["interpolation"] = {"glyph_ids": [source["glyph_id"], peer["glyph_id"]], "ratio": ratio,
+                                            "basis": "compatible_reviewed_geometry"}
+                for ref in peer["source_refs"]:
+                    if ref not in refs:
+                        refs.append(copy.deepcopy(ref))
+            paths = curved_strokes(g["strokes"]) if self.variation.amount else g["strokes"]
+            strokes = map_strokes(paths, self.variation.transform(g, factors, size))
+            item = {"token_id": token_id, "glyph_id": source["glyph_id"], "text": text, "role": role,
+                    "representation": source["representation"], "strokes": strokes,
+                    "pen_width_mm": self.profile["pen"]["width_mm"]*factors["pen_width"], "nominal_size_mm": size,
+                    "source_refs": refs, "semantic": True, "variation": factors}
+            descriptor = shape_descriptor(item) if self.variation.amount else None
+            assessments = [assess_pair(descriptor, record["descriptor"], threshold_mm=NEAR_THRESHOLD_MM+.003) for record in records] if descriptor else []
+            conflicts = [pair for pair in assessments if pair["category"] in {"exact", "near"}]
+            distance = min((pair["distance_mm"] for pair in assessments), default=1.)
+            if best is None or distance > best_distance:
+                best, best_distance = (g, item, descriptor), distance
+            if not conflicts:
+                best, best_distance = (g, item, descriptor), distance
+                break
+        g, item, descriptor = best
+        factors = item["variation"]
+        self.variant_history[choice_key] = item["glyph_id"]
+        used.add(source_family(next(form for form in forms if form["glyph_id"] == item["glyph_id"]), self.observations))
+        if descriptor is not None:
+            self.history.setdefault(history_key, []).append({"token_id": token_id, "page": self.current_page,
+                                                            "descriptor": descriptor})
+        item["variation"]["candidate_count"] = trial+1
+        item["variation"]["minimum_recent_distance_mm"] = round(best_distance, 7) if records else None
         box = Box(g["advance"] * size * factors["width"], [item])
         # Reserve complete ink, including terminal overhang and rounded caps.
         left = min(0, box.bounds[0])
@@ -265,7 +353,7 @@ class Shaper:
         raise InkformError("unsupported_math", f"Unsupported math type: {typ}")
 
 
-def plan_document(document, profile, seed=72, mode=None):
+def _plan_document_once(document, profile, seed=72, mode=None, nonces=None):
     validate_document(document); validate_profile(profile)
     mode = resolve_render_mode(profile, mode)
     representation = "centerline" if mode == "fresh_strokes" else "clean_outline"
@@ -282,7 +370,7 @@ def plan_document(document, profile, seed=72, mode=None):
     if isinstance(margins, (int, float)):
         margins = dict.fromkeys(("top", "right", "bottom", "left"), margins)
     available = width - margins["left"] - margins["right"]
-    shaper = Shaper(profile, seed, mode, size)
+    shaper = Shaper(profile, seed, mode, size, nonces)
     habit = profile.get("corrections", {})
     sampled_rate = habit.get("rate", 0) if document.get("handwriting", {}).get("corrections", "sampled") == "sampled" and shaper.has_correction_mark() else 0
     line_height = profile["metrics"]["line_height"] * size
@@ -302,6 +390,7 @@ def plan_document(document, profile, seed=72, mode=None):
         if cursor + ink_height > height - margins["bottom"]:
             page_index += 1
             cursor = margins["top"]
+        shaper.commit_page(page_index, line.items)
         baseline = cursor - b[1]
         placed = line.shifted(margins["left"] - min(0, b[0]), baseline)
         for item in placed.items:
@@ -362,4 +451,26 @@ def plan_document(document, profile, seed=72, mode=None):
     if len(set(token_ids)) != len(token_ids) or rendered != expected:
         raise InkformError("content_accounting_failed", "The shaped geometry must account for every required symbol in its exact role.", {"required": len(needed), "rendered": len(instances), "missing": [{"role": role, "text": text, "count": count} for (role, text), count in (expected - rendered).items()], "unexpected": [{"role": role, "text": text, "count": count} for (role, text), count in (rendered - expected).items()]})
     geometry_hash = hashlib.sha256(json.dumps(instances, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "variation": {"version": "inkform-occurrence-1", "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}}
+    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "variation": {"version": "inkform-occurrence-2", "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}}
+
+
+def plan_document(document, profile, seed=72, mode=None):
+    """Shape, audit visible ink, and retry conflicting occurrences finitely."""
+    nonces = {}
+    for attempt in range(3):
+        plan = _plan_document_once(document, profile, seed, mode, nonces)
+        report = audit_repetition(plan["instances"], policy={"amount": plan["variation"]["amount"], "strict_near": True})
+        plan["repetition"] = report
+        plan["variation"]["audit_passes"] = attempt+1
+        failures = [pair for pair in report.get("pairs", []) if pair["category"] in {"exact", "near"}]
+        if report["unchecked_instances"] and plan["variation"]["amount"]:
+            raise InkformError("repetition_audit_incomplete", "Some rendered ink could not be measured; strict non-repetition has not been verified.", {"repetition": report})
+        if plan["variation"]["amount"] == 0 or not (report["exact_count"] or report["near_count"] or report["unchecked_instances"]):
+            return plan
+        for pair in failures:
+            token = pair["second_token_id"]
+            nonces[token] = nonces.get(token, 0)+1
+    missing = Counter((pair["role"], pair["text"]) for pair in failures)
+    raise InkformError("repetition_exhausted", "The reviewed style envelope cannot supply sufficiently different forms for this page and its neighbor. Add and review more examples of the listed characters or symbols, then render again.",
+                       {"repetition": report, "attempted_passes": 3,
+                        "needed_samples": [{"role": role, "text": text, "conflicting_pairs": count} for (role,text),count in missing.items()]})

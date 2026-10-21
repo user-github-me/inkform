@@ -12,7 +12,7 @@
     "basis": "conservative_estimate"
   },
   "corrections": "explicit authored examples; no fabricated sample habit",
-  "geometry_hash": "2cbd6fb2517adc9c9305cbfc8a2f673d027660099648e20f31e3abfbb53b355b",
+  "geometry_hash": "82651ff3e9d5c4c9875457b36bbcfd26a7da83456e5058e587b4db96ada3ede3",
   "artifacts": [
     "handwriting.svg",
     "mathematics.svg",

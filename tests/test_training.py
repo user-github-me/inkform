@@ -71,6 +71,28 @@ def test_raw_samples_are_preserved_but_never_claimed_as_learned_forms(inputs):
     assert source.read_bytes() == before
 
 
+def test_training_mines_private_candidates_without_approving_them(inputs):
+    writer = approved_writer(inputs, 'mining-writer')
+    trained = train_profile(inputs['samples'], writer, observations=inputs['manifest'],
+                            document=literal_document('oooo'), mine=True)
+    assert trained['ok'], trained['diagnostics']
+    assert trained['diversity']['collection_requests'][0]['text'] == 'o'
+    assert trained['reviewed_glyph_count'] == 1
+    assert trained['sample_mining']['candidate_count'] == 0  # Only existing evidence on this page.
+    assert Path(trained['report_path']).is_file()
+
+
+def test_default_training_calibration_exercises_repeated_forms(inputs):
+    writer = approved_writer(inputs, 'repeat-calibration')
+    trained = train_profile(inputs['samples'], writer, observations=inputs['manifest'])
+    assert trained['ok'], trained['diagnostics']
+    document = json.loads(Path(trained['calibration']['document_path']).read_text())
+    assert document['blocks'][0]['children'][0]['text'] == 'o o o o'
+    checked = json.loads(Path(trained['calibration']['report_path']).read_text())
+    assert checked['repetition']['geometry_source'] == 'emitted_pdf_vector_paths'
+    assert checked['repetition']['exact_count'] == checked['repetition']['near_count'] == 0
+
+
 def test_raw_to_reviewed_outlines_selects_writer_default_and_renders_real_pdf(inputs):
     raw = train_profile(inputs["samples"], "first-writer")
     original_path = Path(raw["profile_path"])

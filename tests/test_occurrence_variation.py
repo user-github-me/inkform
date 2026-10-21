@@ -91,18 +91,17 @@ def test_learning_controls_sampled_axes_without_disabling_unsupported_gap_estima
     assert OccurrenceVariation(profile, 2).word_gap("word") == 1
 
 
-def test_reviewed_variants_do_not_repeat_immediately_and_survive_unrelated_insert(profile):
+def test_aliases_do_not_inflate_exemplar_count_and_preceding_nodes_share_history(profile):
     alternate = copy.deepcopy(next(g for g in profile["glyphs"] if (g["role"], g["text"]) == ("text", "n")))
     alternate["glyph_id"] += ".alternate"
     profile["glyphs"].append(alternate)
     document = literal_document("nnnn nnnn")
-    first = plan_document(document, profile)
-    ids = [item["glyph_id"] for item in first["instances"]]
-    assert all(a != b for a, b in zip(ids, ids[1:]))
     document["blocks"].insert(0, {"id": "other", "type": "paragraph", "children": [{"id": "other-text", "type": "text", "text": "nnnn"}]})
-    surviving = [item for item in plan_document(document, profile)["instances"] if item["content_node_id"] == "body-text"]
-    assert ids == [item["glyph_id"] for item in surviving]
-    assert list(map(normalized, first["instances"])) == list(map(normalized, surviving))
+    plan = plan_document(document, profile)
+    assert len({item["glyph_id"] for item in plan["instances"]}) == 1
+    assert {item["variation"]["independent_form_count"] for item in plan["instances"]} == {1}
+    assert plan["repetition"]["exact_count"] == plan["repetition"]["near_count"] == 0
+    assert plan == plan_document(document, profile)
 
 
 def test_limit_arrows_vary_lengths_without_flipping_or_losing_signs(profile):
@@ -197,7 +196,7 @@ def test_explicit_correction_checks_deleted_coverage_and_requires_reviewed_mark(
 
 
 def test_sampled_restarts_are_deterministic_and_require_habit_plus_reviewed_mark(profile):
-    document = literal_document("small notes " * 35)
+    document = literal_document("small notes " * 8)
     no_habit = with_mark(profile)
     assert not plan_document(document, no_habit)["corrections"]
     profile = with_mark(profile, .25)

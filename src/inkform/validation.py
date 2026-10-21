@@ -21,6 +21,7 @@ from pypdf import PdfReader, PdfWriter, Transformation
 from pypdf.generic import ContentStream, DictionaryObject, NameObject
 
 from .errors import InkformError
+from .repetition import audit_repetition, item_distance, shape_descriptor
 
 
 PT_TO_MM = 25.4 / 72
@@ -330,14 +331,186 @@ def _check_manifest(manifest: dict, report: dict, width: float, height: float, m
                     for (glyph, digest), count in hashes.items() if count > 1]
         report["repeated_geometry"] = repeated
         if repeated:
-            _warning(report, "repeated_geometry", "Some instances have identical geometry; this is a style diagnostic, not a failure.", groups=len(repeated))
+            _warning(report, "repeated_geometry", "Stored geometry hashes repeat; the independent path audit determines whether visible shapes repeat.", groups=len(repeated))
         _check_content_accounting(manifest, instances, report)
+
     unresolved = manifest.get("unresolved_inputs", [])
     report["unresolved_inputs"] = unresolved
     if unresolved:
         _warning(report, "declared_missing_input", "The document records unresolved source inputs; those items are not claimed as answered.", count=len(unresolved) if isinstance(unresolved, list) else None)
     report["checks"].setdefault("content_accounted_for", "not_checked")
     report["checks"].setdefault("math_correctness", "not_checked")
+    report["checks"].setdefault("repetition", "not_checked")
+
+
+def _emitted_glyphs(reader, manifest):
+    """Decode ordinal marked glyph paints directly from the exported PDF.
+
+    Labels identify only group boundaries. Roles/text come from the existing
+    semantic manifest, while every curve and pen width comes from PDF operators.
+    Unmarked older exports return None rather than claiming an emitted-ink audit.
+    """
+    expected = manifest.get("instances")
+    if not isinstance(expected, list):
+        return None
+    contract = manifest.get("emitted_glyph_groups")
+    if contract is not None and (not isinstance(contract, dict) or contract.get("version") != "inkform-ordinal-paths-1"
+                                 or contract.get("count") != len(expected)):
+        raise ValueError("Invalid emitted glyph group contract")
+    result, marked_pages = [], 0
+    unmarked_ink, unsupported_paint_state = False, False
+    for page_index, page in enumerate(reader.pages):
+        page_expected = [item for item in expected if isinstance(item, dict) and item.get("page") == page_index]
+        media = list(map(float, page.mediabox))
+        unit = float(page.get("/UserUnit", 1))
+        state = {"matrix": (1, 0, 0, 1, 0, 0), "width": 1., "stroke_white": False, "fill_white": False, "cap": 0, "join": 0, "dash": []}
+        states, marks, paths, groups = [], [], [], []
+        group = None
+
+        def point(values):
+            x, y = _transform(tuple(map(float, values)), state["matrix"])
+            return [(x-media[0])*unit*PT_TO_MM, (media[3]-y)*unit*PT_TO_MM]
+
+        for values, op in ContentStream(page.get_contents(), reader).operations:
+            if _nonfinite_operand(values):
+                raise ValueError("Non-finite emitted glyph operand")
+            if op in {b"BMC", b"BDC"}:
+                name = str(values[0]) if values else ""
+                marks.append(name)
+                if name == "/InkformGlyph":
+                    if group is not None:
+                        raise ValueError("Nested Inkform glyph markers")
+                    group, paths = [], []
+            elif op == b"EMC":
+                if not marks:
+                    raise ValueError("Unbalanced PDF marked content")
+                if marks.pop() == "/InkformGlyph":
+                    if group is None or not group:
+                        raise ValueError("A marked glyph has no visible vector ink")
+                    groups.append(group)
+                    group, paths = None, []
+            elif op == b"q":
+                states.append(state.copy())
+            elif op == b"Q":
+                if not states:
+                    raise ValueError("Unbalanced PDF graphics state")
+                state = states.pop()
+            elif op == b"cm":
+                state["matrix"] = _matrix_product(state["matrix"], tuple(map(float, values)))
+            elif op == b"w":
+                state["width"] = abs(float(values[0]))
+            elif op == b"J":
+                state["cap"] = int(values[0])
+            elif op == b"j":
+                state["join"] = int(values[0])
+            elif op == b"d":
+                state["dash"] = list(values[0])
+            elif op in {b"W", b"W*", b"gs"}:
+                unsupported_paint_state = True
+            elif op in {b"g", b"G", b"rg", b"RG", b"k", b"K"}:
+                numeric = list(map(float, values))
+                white = all(v >= .999 for v in numeric) if op.lower() != b"k" else all(v <= .001 for v in numeric)
+                state["stroke_white" if op in {b"G", b"RG", b"K"} else "fill_white"] = white
+            elif group is not None:
+                if op == b"m":
+                    paths.append({"start": point(values), "segments": [], "closed": False})
+                elif op == b"l":
+                    if not paths:
+                        raise ValueError("Emitted glyph line has no starting point")
+                    paths[-1]["segments"].append({"type": "line", "end": point(values)})
+                elif op in {b"c", b"v", b"y"}:
+                    if not paths:
+                        raise ValueError("Emitted glyph curve has no starting point")
+                    current = paths[-1]["segments"][-1]["end"] if paths[-1]["segments"] else paths[-1]["start"]
+                    controls = [point(values[i:i+2]) for i in range(0, len(values), 2)]
+                    if op == b"v":
+                        controls.insert(0, current)
+                    elif op == b"y":
+                        controls.append(controls[-1])
+                    paths[-1]["segments"].append({"type": "cubic", "control1": controls[0], "control2": controls[1], "end": controls[2]})
+                elif op == b"re":
+                    x, y, w, h = map(float, values)
+                    rectangle = [point((x, y)), point((x+w, y)), point((x+w, y+h)), point((x, y+h))]
+                    paths.append({"start": rectangle[0], "segments": [{"type": "line", "end": p} for p in rectangle[1:]], "closed": True})
+                elif op == b"h":
+                    if paths:
+                        paths[-1]["closed"] = True
+                elif op in _PAINT_OPERATORS | {b"n"}:
+                    if op in {b"s", b"b", b"b*"} and paths:
+                        paths[-1]["closed"] = True
+                    fill = op in {b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"} and not state["fill_white"]
+                    stroke = op in {b"S", b"s", b"B", b"B*", b"b", b"b*"} and not state["stroke_white"]
+                    if paths and fill:
+                        if op not in {b"f*", b"B*", b"b*"}:
+                            raise ValueError("Marked glyphs require auditable even-odd fills")
+                        group.append({"representation": "clean_outline", "strokes": [{**p, "closed": True} for p in paths], "pen_width_mm": .25})
+                    if paths and stroke:
+                        if state["cap"] != 1 or state["join"] != 1 or state["dash"]:
+                            raise ValueError("Marked glyphs require solid round-cap round-join pens")
+                        a, b, c, d, _, _ = state["matrix"]
+                        sx, sy = math.hypot(a, b), math.hypot(c, d)
+                        if abs(sx-sy) > 1e-6 or abs(a*c+b*d) > 1e-6:
+                            raise ValueError("Nonuniformly transformed pens are unsupported in emitted glyph audit")
+                        width = state["width"]*sx*unit*PT_TO_MM
+                        if group and group[-1]["representation"] == "centerline" and abs(group[-1]["pen_width_mm"]-width) < 1e-9:
+                            group[-1]["strokes"].extend(paths)
+                        else:
+                            group.append({"representation": "centerline", "strokes": paths, "pen_width_mm": width})
+                    paths = []
+                elif op in {b"Do", b"INLINE IMAGE"} | _TEXT_OPERATORS:
+                    raise ValueError("A marked glyph contains non-path ink")
+            elif op in _PAINT_OPERATORS | {b"Do", b"INLINE IMAGE"}:
+                unmarked_ink = True
+        if group is not None or marks:
+            raise ValueError("Unclosed PDF marked content")
+        if groups:
+            marked_pages += 1
+            if len(groups) != len(page_expected):
+                raise ValueError("Emitted glyph group count differs from manifest instances")
+            for expected_item, paints in zip(page_expected, groups):
+                result.append({"token_id": expected_item.get("token_id"), "role": expected_item.get("role"),
+                               "text": expected_item.get("text"), "page": page_index, "_ink_paints": paints,
+                               **({"nominal_size_mm": expected_item["nominal_size_mm"]} if "nominal_size_mm" in expected_item else {})})
+    if not marked_pages:
+        if contract is not None:
+            raise ValueError("Export declares glyph groups but its PDF has none")
+        return None
+    if unmarked_ink or unsupported_paint_state:
+        raise ValueError("Marked exports contain ungrouped ink or unsupported clipping/graphics-state operations")
+    if marked_pages != len(reader.pages):
+        raise ValueError("Only some pages contain auditable glyph groups")
+    return result
+
+
+def _check_repetition(manifest, instances, report, *, geometry_source="manifest_vector_paths"):
+    """Recalculate visible shapes; stored novelty decisions are never evidence."""
+    variation = manifest.get("variation", {})
+    settings = manifest.get("repetition_policy", {})
+    try:
+        if not isinstance(settings, dict):
+            raise ValueError("Repetition policy must be an object")
+        policy = {key: settings[key] for key in ("threshold_mm", "adjacent_pages", "strict_near") if key in settings}
+        if isinstance(variation, dict) and "amount" in variation:
+            policy["amount"] = variation["amount"]
+        diagnostic = audit_repetition(instances, policy=policy)
+    except (TypeError, ValueError, OverflowError) as exc:
+        report["checks"]["repetition"] = "fail"
+        _issue(report, "invalid_repetition_audit", "Could not audit repeated ink geometry.", reason=str(exc))
+        return
+    diagnostic["geometry_source"] = geometry_source
+    diagnostic["pdf_hash_binding"] = report["checks"].get("manifest_pdf_hash", "not_checked")
+    report["repetition"] = diagnostic
+    report["checks"]["repetition"] = diagnostic["status"]
+    if diagnostic["status"] == "fail":
+        _issue(report, "repeated_ink_geometry", "Repeated ink exceeds the declared physical-shape threshold on the same or adjacent page.",
+               exact_pairs=diagnostic["exact_count"], near_pairs=diagnostic["near_count"],
+               threshold_mm=diagnostic["threshold_mm"])
+    elif diagnostic["status"] in {"not_checked", "partial"}:
+        _warning(report, "incomplete_repetition_audit", "This manifest does not provide auditable paths and semantic roles for every ink instance.",
+                 checked=diagnostic["checked_instance_count"], unchecked=len(diagnostic["unchecked_instances"]))
+    if diagnostic["limited_count"]:
+        _warning(report, "limited_shape_space", "Simple punctuation or bars remain close in shape; the audit does not force them into different symbols.",
+                 pairs=diagnostic["limited_count"])
 
 
 def _check_content_accounting(manifest: dict, instances: list, report: dict) -> None:
@@ -602,9 +775,35 @@ def check_pdf(pdf_path: Path, manifest: dict | None = None, preview_dir: Path | 
         _issue(report, "font_text_present", "Fresh-ink exports must draw glyph geometry instead of font text.", count=report["font_text_operators"])
     if manifest is not None:
         _check_manifest(manifest, report, width, height, margins)
+        try:
+            emitted = _emitted_glyphs(reader, manifest)
+            if emitted is not None:
+                _check_repetition(manifest, emitted, report, geometry_source="emitted_pdf_vector_paths")
+                # The ordinal mapping must also describe the ink that was
+                # actually emitted. Detect a changed PDF even if someone has
+                # recomputed its file hash while retaining an old sidecar.
+                by_token = {item.get("token_id"): item for item in manifest.get("instances", []) if isinstance(item, dict)}
+                mismatches = []
+                for item in emitted:
+                    expected_item = by_token.get(item.get("token_id"))
+                    if expected_item is None:
+                        raise ValueError("Emitted glyph has no manifest token")
+                    distance = item_distance(shape_descriptor(item), shape_descriptor(expected_item))
+                    if distance > .025:
+                        mismatches.append({"token_id": item.get("token_id"), "page": item["page"], "distance_mm": round(distance, 7)})
+                report["checks"]["emitted_glyph_geometry"] = "fail" if mismatches else "pass"
+                if mismatches:
+                    _issue(report, "emitted_glyph_mismatch", "PDF glyph ink differs from its manifest geometry.", instances=mismatches[:100], count=len(mismatches))
+            elif isinstance(manifest.get("instances"), list):
+                _check_repetition(manifest, manifest["instances"], report)
+                report["checks"]["emitted_glyph_geometry"] = "not_checked"
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            report["checks"]["repetition"] = "fail"
+            report["checks"]["emitted_glyph_geometry"] = "fail"
+            _issue(report, "invalid_emitted_glyph_geometry", "Could not independently verify emitted glyph paths.", reason=str(exc))
     else:
         report["checks"].update({"manifest_pdf_hash": "not_checked", "instance_geometry": "not_checked",
-                                  "content_accounted_for": "not_checked", "math_correctness": "not_checked"})
+                                  "content_accounted_for": "not_checked", "math_correctness": "not_checked", "repetition": "not_checked"})
     if preview_dir is not None:
         preview_dir = Path(preview_dir).expanduser().resolve()
         preview_dir.mkdir(parents=True, exist_ok=True)

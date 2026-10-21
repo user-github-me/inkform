@@ -170,6 +170,8 @@ cubic curves with guarded contour, hole, and ink-area preservation. If that
 refinement fails, `refinement_warning` identifies the unsmoothed proposal; it
 still requires review.
 
+Atlas labels use compact keys such as `C0001`, stored as `contact_sheet_id` in `candidates.json`. Match that key to the full candidate ID and evidence hashes before recording a decision; non-ASCII symbols also use printed Unicode code points to remain legible without a matching font.
+
 Read each proposed label in its original page context. Inspect loops, detached
 dots, endings, character identity, baseline, and pen weight on the sheets.
 Approve only the candidate IDs actually inspected. The following snippet

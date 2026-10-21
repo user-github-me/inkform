@@ -25,6 +25,7 @@ def parser():
     train.add_argument("--observations", type=Path, help="Portable labeled observation manifest from sample review")
     train.add_argument("--calibration-document", type=Path, help="Semantic document to use for the calibration PDF")
     train.add_argument("--document", type=Path, help="Check whether the learned profile is ready for this requested document")
+    train.add_argument("--mine", action="store_true", help="Search preserved pages for more forms and write a private review queue")
     profile = sub.add_parser("profile", help="Create, inspect, update, and check private profiles")
     ps = profile.add_subparsers(dest="operation", required=True)
     create = ps.add_parser("create")
@@ -47,6 +48,18 @@ def parser():
     cov.add_argument("profile")
     cov.add_argument("--document", type=Path, required=True)
     cov.add_argument("--mode", choices=["fresh_strokes", "clean_outline"], help="Default: the writer profile's preferred mode")
+    mine = ps.add_parser("mine", help="Find more candidate letter and symbol forms in the writer's sample pages")
+    mine.add_argument("profile")
+    mine.add_argument("--samples", type=Path, help="Default: originals already preserved with this profile")
+    mine.add_argument("--characters", help="Characters to collect; default: every reviewed template")
+    mine.add_argument("--role", help="Restrict candidates to an existing semantic role")
+    mine.add_argument("--per-label", type=int, default=24)
+    mine.add_argument("--min-score", type=float, default=.58)
+    mine.add_argument("--output", required=True, type=Path, help="Private review directory for crops and proposed observations")
+    diversity = ps.add_parser("diversity", help="Count distinct reviewed shapes and identify where more samples would help")
+    diversity.add_argument("profile")
+    diversity.add_argument("--document", type=Path)
+    diversity.add_argument("--mode", choices=["fresh_strokes", "clean_outline"])
     ps.add_parser("list")
     text = sub.add_parser("document", help="Convert a UTF-8 text file to literal document IR")
     text.add_argument("--text-file", required=True, type=Path)
@@ -99,7 +112,7 @@ def run(args):
     if args.command == "train":
         from .training import train_profile
         return train_profile(args.samples, args.id, prototype=args.prototype, observations=args.observations,
-                             calibration_document=args.calibration_document, document=args.document)
+                             calibration_document=args.calibration_document, document=args.document, mine=args.mine)
     if args.command == "profile":
         op = args.operation
         if op == "list":
@@ -121,6 +134,13 @@ def run(args):
             profile = load_profile(args.file)
             return _summary(profile, save_profile(profile))
         profile = load_profile(args.profile)
+        if op == "mine":
+            from .mining import mine_candidates
+            return mine_candidates(profile, args.samples, args.output, characters=args.characters,
+                                   role=args.role, per_label=args.per_label, min_score=args.min_score)
+        if op == "diversity":
+            from .diversity import profile_diversity
+            return profile_diversity(profile, load_document(args.document) if args.document else None, args.mode)
         if op == "coverage":
             mode = resolve_render_mode(profile, args.mode)
             rep = "centerline" if mode == "fresh_strokes" else "clean_outline"

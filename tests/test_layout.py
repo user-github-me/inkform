@@ -159,6 +159,9 @@ def test_math_coverage_never_uses_text_role(profile):
 
 
 def test_long_text_reflows_and_paginates_without_compressing_geometry(profile):
+    # This test isolates physical reflow. Strict novelty intentionally changes
+    # choices with the neighboring-page inventory and can exhaust one exemplar.
+    profile["variation"] = {"amount": 0}
     source = "Small writing keeps its original size. " * 70
     document = literal_document(source)
     document["page"] = {"width_mm": 90, "height_mm": 70, "margins_mm": 10, "body_x_height_mm": 3.1}
@@ -196,7 +199,7 @@ def test_single_unbreakable_word_reports_overflow_without_scaling(profile):
     assert error.value.code == "layout_overflow"
 
 
-def test_geometry_is_deterministic_and_stable_node_survives_preceding_edit(profile):
+def test_geometry_is_deterministic_and_inserted_nodes_participate_in_repetition_checks(profile):
     document = literal_document("A stable sentence.")
     first = plan_document(document, profile, seed=2)
     assert first == plan_document(document, profile, seed=2)
@@ -204,15 +207,12 @@ def test_geometry_is_deterministic_and_stable_node_survives_preceding_edit(profi
     edited = copy.deepcopy(document)
     edited["blocks"].insert(0, {"id": "inserted", "type": "paragraph", "children": [{"id": "inserted-text", "type": "text", "text": "A new paragraph."}]})
     second = plan_document(edited, profile, seed=2)
-    surviving = {item["token_id"]: item for item in second["instances"] if item["content_node_id"] == "body-text"}
-    for original in first["instances"]:
-        moved = surviving[original["token_id"]]
-        assert original["glyph_id"] == moved["glyph_id"]
-        ox, oy = original["strokes"][0]["start"]
-        mx, my = moved["strokes"][0]["start"]
-        normalized_original = map_strokes(original["strokes"], lambda x, y: (round(x - ox, 9), round(y - oy, 9)))
-        normalized_moved = map_strokes(moved["strokes"], lambda x, y: (round(x - mx, 9), round(y - my, 9)))
-        assert normalized_original == normalized_moved
+    assert second == plan_document(edited, profile, seed=2)
+    surviving = {item["token_id"] for item in second["instances"] if item["content_node_id"] == "body-text"}
+    assert surviving == {item["token_id"] for item in first["instances"]}
+    # Insertion can change a surviving form when its old geometry would repeat
+    # the new preceding ink. Global uniqueness takes precedence over that shape.
+    assert second["repetition"]["exact_count"] == second["repetition"]["near_count"] == 0
 
 
 def test_distinct_node_ids_cannot_collide_with_generated_math_paths(profile):

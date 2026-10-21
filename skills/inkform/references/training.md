@@ -21,7 +21,7 @@ For an existing legacy collection, `--prototype ./output` reuses its reviewed ev
 
 ```sh
 inkform train --id my-writing --samples ./writing-samples \
-  --calibration-document calibration.json --document requested-document.json
+  --calibration-document calibration.json --document requested-document.json --mine
 ```
 
 Training reports separate stages:
@@ -32,6 +32,27 @@ Training reports separate stages:
 - `ready_for_document`: the supplied document passes role coverage and physical layout preflight with no declared unresolved inputs. A printable partial document reports `renderable: true`, `ready: false`, and `content_complete: false`.
 
 A requested calibration document is rendered when the selected profile can cover it. Otherwise, use the diagnostic vector atlas and a targeted calibration passage drawn from known forms. Diagnostic printed labels are not substitutes in a handwritten document. Calibration and training artifacts stay in private storage.
+
+The default specimen repeats each covered character or symbol four times, so calibration can reveal stamped forms. Training reports a `diversity` inventory: source families, independent observations, distinct path geometry, physically separated shapes, and prioritized collection requests. The logarithmic collection targets are review budgets, not proof that a certain sample count guarantees unique output. Aliases or multiple representations of one crop count once. Two genuinely separate captures with the same shape still do not enlarge the distinct shape pool.
+
+## Collect, render, inspect, refine
+
+```sh
+inkform profile diversity my-writing --document requested-document.json
+inkform profile mine my-writing --characters 'nemr→' --per-label 24 --output ./build/private-review
+```
+
+Mining compares whole ink components against the writer's reviewed masks. It preserves page hashes, context crops, masks, candidate scores, and an importable `observations.json`; every candidate remains proposed. The score measures shape similarity, not reliable recognition. It does not cut arbitrary fragments from joined words, invent missing forms, or approve graph-axis arrows as limit operators. Inspect candidate context, the complete letter including detached marks, baseline/x-height estimates, and fitted vector paths. When compatible source forms serve another role, document the specific source and visual justification explicitly.
+
+Detached dots and multi-part signs need context-aware manual crops that retain all their components; the component miner intentionally skips forms such as `i`, `j`, and `=`. For an arrow with a separated shaft or head, inspect the source and isolate the complete sign manually before import.
+
+Use the observation importer to generate candidates, inspect the fitted geometry, and record exact mask/geometry hashes using [observations.md](observations.md). Retain distinct ordinary and hurried forms that actually occur in the samples, then resume training with the reviewed manifest. More independent evidence should widen the supported shape range only when that evidence shows a wider range; a large collection is not a reason to make a neat writer messy.
+
+If a compatible arrow is isolated from a long graph axis, the visible head and shaft curvature can be reviewed, but the crop length is a choice rather than an observed independent operator length. Set `variation_dimensions_observed: false` on such glyphs and document the role transfer. They remain renderable donors, while training excludes their dimensions from learned width/height variation. Do not count crop choices as the writer's natural arrow-length distribution.
+
+Render the same calibration text with a saved seed, including dense repeated letters and several arrows/signs across adjacent pages. Run `check PDF --manifest BUILD_JSON`, inspect the actual-PDF repetition report and every preview, then address the named forms and render again. The renderer searches a bounded pool automatically and checks the final page placements. A `repetition_exhausted` result means the safe range was insufficient: mine additional source examples or identify the remaining evidence gap. Never fix this by reducing the threshold or setting `variation.amount` to zero. That opt-out exists only for an explicitly requested faithful diagnostic reproduction.
+
+Finish only when the ordinary forms pass the actual emitted-path audit and visual inspection confirms that identity, direction, spacing, and the writer's characteristic shapes remain intact. Simple dots and bars can legitimately have a limited range; inspect their separate report and describe that limitation honestly. Keep failures and iteration reports privately so the final result is supported by evidence. Physical print calibration remains a separate, actual paper check.
 
 The immutable profile records the calibration plan and its `execution_report_path`. Read that training report for actual export success, errors, and resulting PDF paths; a planned artifact is not proof of a successful export.
 

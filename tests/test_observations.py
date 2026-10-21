@@ -123,6 +123,68 @@ class ObservationTests(unittest.TestCase):
         self.assertEqual(profile["sources"][0]["sha256"], sha256_file(source))
         self.assertIsNone(profile["observations"][0]["bbox_xywh"])
 
+    def arrow_donors(self):
+        folder = self.root / "axis-donors"; folder.mkdir()
+        source = folder / "page.png"
+        page = Image.new("RGB", (330, 170), "white")
+        draw = ImageDraw.Draw(page)
+        rows = []
+        for index, (y, length) in enumerate(((20, 110), (100, 175))):
+            draw.line((20, y+20, 20+length, y+20), fill="black", width=5)
+            draw.line((10+length, y+10, 20+length, y+20, 10+length, y+30), fill="black", width=5)
+            rows.append({"id": f"arrow-{index}", "text": "→", "role": "math.operator",
+                         "source_path": str(source), "bbox_xywh": [15, y+3, length+15, 35],
+                         "baseline_px": 33, "xheight_px": 40})
+        page.save(source)
+        manifest = folder / "arrows.json"
+        manifest.write_text(json.dumps({"schema_version": "1.0", "observations": rows}))
+        proposal = import_observations(manifest)
+        review_path = Path(proposal["import_report"]["review_path"])
+        records = json.loads((review_path.parent / "candidates.json").read_text())["candidates"]
+        review_path.write_text(json.dumps({"reviews": {record["candidate_id"]: {
+            "mask_sha256": record["mask_sha256"], "geometry_sha256": record["geometry_sha256"],
+            "label_status": "reviewed", "geometry_status": "reviewed", "reviewed_by": "drawn-axis-review"}
+            for record in records}}))
+        reviewed = import_observations(manifest)
+        for glyph in reviewed["glyphs"]:
+            glyph["variation_dimensions_observed"] = False
+            glyph["role_transfer"] = "Reviewed right-axis head reused as an operator; cropped shaft length is unobserved."
+            glyph["natural_length_status"] = "unknown: chosen axis crop"
+        return source, manifest, reviewed, review_path
+
+    def test_same_evidence_reimport_retains_dimension_exclusion_without_geometry_approval(self):
+        _, manifest, base, review_path = self.arrow_donors()
+        refreshed = import_observations(manifest, base_profile=base)
+        self.assertEqual(len(accepted_glyphs(refreshed)), 4)
+        for glyph in refreshed["glyphs"]:
+            self.assertIs(glyph["variation_dimensions_observed"], False)
+            self.assertEqual(glyph["role_transfer"], base["glyphs"][0]["role_transfer"])
+            self.assertEqual(glyph["natural_length_status"], "unknown: chosen axis crop")
+        fitted = measure_style(refreshed)["variation_update"]
+        self.assertFalse(fitted and any(row["text"] == "→" for row in fitted["by_glyph"]))
+        # Source-context knowledge survives, but the old profile's geometry
+        # status must not replace the exact candidate review ledger.
+        review_path.write_text(json.dumps({"reviews": {}}))
+        unreviewed = import_observations(manifest, base_profile=base)
+        self.assertFalse(accepted_glyphs(unreviewed))
+        self.assertTrue(all(g.get("variation_dimensions_observed") is False for g in unreviewed["glyphs"]))
+        regenerated_again = import_observations(manifest, base_profile=unreviewed)
+        self.assertFalse(accepted_glyphs(regenerated_again))
+        self.assertTrue(all(g.get("variation_dimensions_observed") is False for g in regenerated_again["glyphs"]))
+
+    def test_changed_source_does_not_inherit_axis_exclusion_or_geometry_review(self):
+        source, manifest, base, _ = self.arrow_donors()
+        with Image.open(source) as opened:
+            changed = opened.copy()
+        ImageDraw.Draw(changed).line((28, 21, 32, 26), fill="black", width=3)
+        changed.save(source)
+        refreshed = import_observations(manifest, base_profile=base)
+        old_ids = {glyph["glyph_id"] for glyph in base["glyphs"]}
+        additions = [glyph for glyph in refreshed["glyphs"] if glyph["glyph_id"] not in old_ids]
+        self.assertEqual(len(additions), 4)
+        self.assertTrue(all(g["geometry_status"] == "proposed" for g in additions))
+        self.assertTrue(all("variation_dimensions_observed" not in g and "role_transfer" not in g for g in additions))
+
     def test_invalid_label_review_and_outside_crop_rejected(self):
         _, manifest = self.writer("writer", 80)
         data = json.loads(manifest.read_text())
@@ -210,3 +272,27 @@ class ObservationTests(unittest.TestCase):
                 import_observations(manifest)
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_long_manifest_ids_keep_compact_unambiguous_atlas_labels(tmp_path, monkeypatch):
+    import numpy as np
+    monkeypatch.setenv("INKFORM_DATA_DIR", str(tmp_path/"private"))
+    source = tmp_path/"page.png"
+    image = Image.new("RGB", (120, 120), "white")
+    ImageDraw.Draw(image).ellipse((32, 24, 76, 88), outline="black", width=7)
+    image.save(source)
+    long_id = "source-occurrence-" + "long-context-"*30
+    manifest = tmp_path/"observations.json"
+    manifest.write_text(json.dumps({"schema_version": "1.0", "observations": [{
+        "id": long_id, "text": "o", "role": "text", "source_path": str(source),
+        "bbox_xywh": [12, 10, 86, 96], "baseline_px": 78, "xheight_px": 64}]}))
+    profile = import_observations(manifest)
+    directory = Path(profile["import_report"]["review_directory"])
+    rows = json.loads((directory/"candidates.json").read_text())["candidates"]
+    assert [row["contact_sheet_id"] for row in rows] == ["C0001", "C0002"]
+    assert all(row["manifest_observation_id"] == long_id for row in rows)
+    assert len({row["candidate_id"] for row in rows}) == 2
+    with Image.open(directory/"review-01.png") as atlas:
+        # The source ID previously crossed this boundary into the next glyph's
+        # label. The compact key now leaves the cell edge completely clear.
+        assert np.asarray(atlas.crop((232, 52, 244, 82))).min() == 255

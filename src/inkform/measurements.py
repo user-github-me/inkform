@@ -203,6 +203,7 @@ def _variation_update(profile, grouped, observations, gaps, line_count):
         # Old geometry-only records may still be rendered and summarized, but
         # differing representations cannot establish independent captures.
         supported = [glyph for glyph, _ in variants if glyph["source_refs"]
+                     and glyph.get("variation_dimensions_observed", True)
                      and all(ref.get("observation_id") in observations for ref in glyph["source_refs"])]
         if len(supported) < 2 or role == "mark.correction":
             continue
@@ -308,6 +309,9 @@ def measure_style(profile: dict) -> dict:
     if profile["synthetic"]:
         uncertainties.append("This is synthetic demonstration geometry, not learned personal handwriting; no learned metrics are proposed.")
     variation = _variation_update(profile, grouped, observations, gaps, line_count)
+    dimension_exclusions = [g["glyph_id"] for g in accepted if not g.get("variation_dimensions_observed", True)]
+    if dimension_exclusions:
+        uncertainties.append("Some reviewed forms have crop-chosen or otherwise unobserved dimensions; those dimensions are excluded from learned occurrence variation.")
     corrections, correction_exclusions = _correction_update(profile)
     if variation:
         uncertainties.append("Occurrence variation is a bounded synthesis from reviewed form spread; it does not recover pen movement or a complete handwriting distribution.")
@@ -318,6 +322,7 @@ def measure_style(profile: dict) -> dict:
             "form_geometry": forms, "word_gap_samples": gaps, "word_gap_exclusions": exclusions,
             "metric_updates": updates, "metric_update_evidence": evidence, "retained_metrics": copy.deepcopy(profile["metrics"]),
             "variation_update": variation, "correction_update": corrections, "correction_frequency_exclusions": correction_exclusions,
+            "variation_dimension_exclusions": dimension_exclusions,
             "physical_scale": {"inferred_from_images": False, "retained": copy.deepcopy(profile["physical_scale"]),
                                "requirement": "Known physical source calibration or an explicit user-selected writing size is required; image pixel dimensions alone provide no millimeter scale."},
             "uncertainties": uncertainties}

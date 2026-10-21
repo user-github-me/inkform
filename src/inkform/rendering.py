@@ -106,7 +106,11 @@ def export_pdf(plan, profile, path, title):
         c.setStrokeColor(color); c.setFillColor(color)
         for item in plan["instances"]:
             if item["page"] == page_index:
+                # Ordinal marked-content groups let validation inspect the
+                # emitted paths without embedding text or private provenance.
+                c._code.append("/InkformGlyph BMC")
                 draw_instance(c, item, page["height_mm"])
+                c._code.append("EMC")
         c.showPage()
     c.save()
 
@@ -133,6 +137,7 @@ def render_document(document, profile, output, seed=72, mode=None, *, preview_dp
             "profile_sha256": hashlib.sha256(json.dumps(profile, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
             "document_sha256": hashlib.sha256(json.dumps(document, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
             "renderer_version": __version__, "seed": seed, "render_mode": mode,
+            "emitted_glyph_groups": {"version": "inkform-ordinal-paths-1", "count": len(plan["instances"])},
             "synthetic_profile": profile["synthetic"], "pdf_sha256": hashlib.sha256(pdf.read_bytes()).hexdigest(),
             "representations_used": sorted({i["representation"] for i in plan["instances"]}),
             "unreported_substitutions": 0, "missing_glyphs": [],

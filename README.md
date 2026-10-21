@@ -6,11 +6,11 @@
 
 Inkform is an open-source Python engine and agent skill for learning reusable private handwriting profiles and producing printable vector PDFs. It fits the writer's own reviewed forms, preserves genuine variants, and keeps text and mathematical roles separate.
 
-This is a working **0.2 implementation**, with a profile importer, reviewed vector geometry, semantic layout, a command-line interface, and actual PDF checks. Personal resemblance and print quality still need calibration. It is not a fully automatic photo-to-handwriting model.
+This is a working **0.3 implementation**, with a profile importer, reviewed vector geometry, semantic layout, a command-line interface, and actual PDF checks. Personal resemblance and print quality still need calibration. It is not a fully automatic photo-to-handwriting model.
 
 Inkform includes sample-first training, portable reviewed observations, smooth cubic outline refinement, and 300 dpi previews. A writer can choose `default_render_mode: clean_outline` to retain fuller, sample-derived forms. An explicit `--mode` overrides that preference. The PDF itself remains vector at every preview resolution.
 
-Repeated letters and math symbols now receive bounded variation, including the length of arrows. The profile learns the range from distinct reviewed examples where available; sparse evidence uses a conservative estimate. Reviewed correction habits can add crossed-out word restarts at a rate learned from sample passages, using the writer's own strike or scribble geometry. Writers with no observed correction habit receive none.
+The renderer now checks the actual visible shapes of repeated letters and symbols on the same and adjacent pages. It rotates distinct reviewed forms, varies smooth geometry, and changes arrow shafts and heads separately. Exact and near copies of ordinary forms block export; the engine reports when the available shape range is insufficient. Simple dots and straight bars have a separately reported limited range. The profile learns from distinct reviewed examples where available; sparse evidence uses a conservative estimate. Reviewed correction habits can add crossed-out word restarts at a rate learned from sample passages, using the writer's own strike or scribble geometry.
 
 ## Install with npm
 
@@ -56,7 +56,7 @@ inkform train --id my-writing --samples ./writing-samples
 # The agent reviews sample forms and their fitted geometry, then resumes:
 inkform train --id my-writing --samples ./writing-samples \
   --observations ./reviewed-observations.json \
-  --calibration-document calibration.json --document document.json
+  --calibration-document calibration.json --document document.json --mine
 inkform render document.json --profile my-writing --output build/notes.pdf
 ```
 
@@ -66,12 +66,16 @@ Once calibrated, the profile is reused for new documents. Additional samples imp
 
 Include multiple occurrences of frequent letters and symbols, ordinary word spacing, and representative passages containing any corrections. The agent reviews the forms, word boxes, and correction counts separately. This distinguishes the writer's actual range from one repeated crop or a collection containing only their messiest words. See [observation evidence](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/observations.md) for the manifest format.
 
+`profile diversity` identifies overused forms and counts physically distinct reviewed shapes. `profile mine` searches preserved pages for more examples using the writer's own masks and writes a private queue with source context. Candidates require label and geometry review; they are not automatically accepted. The skill repeats collection, calibration, actual-PDF checking, and visual inspection until the requested document passes or an evidence gap remains. More samples help when they contain genuinely different forms.
+
 ## Personal profiles
 
 ```sh
 # Inspect accepted forms and preflight actual content.
 inkform profile inspect my-writing --preview build/profile.pdf
 inkform profile coverage my-writing --document document.json
+inkform profile diversity my-writing --document document.json
+inkform profile mine my-writing --characters 'nemr→' --output ./build/private-review
 inkform render document.json --profile my-writing --seed 72 --output build/personal.pdf
 
 # Preserve additional samples, orientation, hashes, and import observations.
@@ -104,12 +108,12 @@ See the [agent skill](https://github.com/user-github-me/inkform/blob/main/skills
 
 ## Current limits
 
-- Both modes use deterministic variant selection and bounded per-occurrence variation. Repeated-form measurements inform width and height; estimated variation remains labeled. Fresh mode also supports rounded caps and joins and smooth width profiles. Photo-derived paths do not recover real pen pressure, timing, or order.
+- Both modes use deterministic source-family rotation and bounded shape variation. Repeated-form measurements inform width and height; estimated variation remains labeled. Compatible centerline forms can interpolate; outlines retain their reviewed contours and topology. Photo-derived paths do not recover real pen pressure, timing, or order.
 - Cross-outs need a reviewed correction mark. Automatic placement additionally needs a correction rate counted from representative sample passages; importing photographs or isolated marks alone does not establish that habit. Corrections are text restarts, not generated wrong answers.
 - Clean outlines preserve the observed ink shape and can be the writer's default. Their thickness is baked into their geometry. Uncalibrated size changes, scripts, and scalable outline primitives are rejected.
 - Outline refinement fits continuous cubic curves with bounded movement while preserving detached marks, holes, containment, and ink area. New candidates need geometric review; old profile snapshots remain available. Changing the PNG preview DPI does not smooth the PDF's geometry.
 - Unrefined centerlines can remain angular. Reviewed consecutive word boxes can inform word-gap variation; connected cursive, learned within-word kerning, automatic page/perspective measurement, universal OCR segmentation, advanced math, and tablet capture are future work.
-- Actual PDF parsing, exact page size, vector paths, image absence, safe bounds, and every-page rasterization are checked. Similarity, correct transcription/answers, and printed readability require review. There is no invented handwriting-match score.
+- Actual PDF parsing checks physical page size, vector paths, image absence, safe bounds, every-page rasterization, and emitted glyph shapes. Same/adjacent-page duplicates and near copies fail for ordinary forms; simple punctuation has a separate limited-range report. A bounded candidate search can return `repetition_exhausted` on dense content with too little source variety. Similarity to the writer, transcription/answers, and printed readability still require review.
 - Coverage is specific to each writer's reviewed samples. Missing forms fail coverage; Inkform never silently inserts a font.
 
 ## Contributing and license

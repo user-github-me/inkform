@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 — 2026-10-22
+
+- Reject exact and near copies of ordinary letter and symbol shapes on the same and adjacent pages. Audit the actual emitted PDF paths, with separate limited-range reporting for simple dots and bars.
+- Rotate distinct source families, blend compatible reviewed centerlines, and apply bounded smooth shape changes. Vary arrow shaft curvature and head proportions independently while preserving direction.
+- Search a bounded candidate pool and fail with an actionable `repetition_exhausted` diagnostic when usable source variety is insufficient; changing IDs or tiny numeric values cannot bypass the check.
+- Add `profile diversity`, `profile mine`, and `train --mine` for source-aware collection requests and private, reviewable candidate queues. Mining never automatically accepts labels or fitted geometry.
+- Repeat known forms in the default calibration and teach the skill to collect, review, render, inspect, and refine using the actual-PDF report.
+
 ## 0.2.0 — 2026-10-22
 
 - Vary individual letters and mathematical symbols, including repeated arrow lengths, while retaining smooth vector output and reproducible seeds.

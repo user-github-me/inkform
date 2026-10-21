@@ -15,6 +15,7 @@ from collections import Counter
 from pathlib import Path
 
 from .document import clusters, load_document, validate_document, visible_requirements
+from .diversity import profile_diversity
 from .errors import InkformError
 from .geometry import geometry_hash
 from .ingest import import_prototype, import_samples
@@ -141,23 +142,25 @@ def _readiness(profile, document) -> dict:
     try:
         plan = plan_document(document, profile)
         result.update(status="unresolved_inputs" if unresolved else "ready", ready=not unresolved, renderable=True,
-                      page_count=plan["page_count"], required_symbol_count=plan["required_symbol_count"])
+                      page_count=plan["page_count"], required_symbol_count=plan["required_symbol_count"],
+                      repetition=copy.deepcopy(plan.get("repetition")))
     except InkformError as exc:
         result.update(status=exc.code, diagnostic=exc.as_dict())
     return result
 
 
 def _specimen_document(profile):
-    """A coverage-matched specimen, never an invented transcription of samples."""
+    """Exercise repeated known forms, never invent a transcription of samples."""
     representation = "centerline" if resolve_render_mode(profile) == "fresh_strokes" else "clean_outline"
     glyphs = [g for g in accepted_glyphs(profile) if g["role"] != "mark.correction" and g["representation"] == representation and len(clusters(g["text"])) == 1 and not g["text"].isspace()]
     blocks = []
     text_forms = sorted({g["text"] for g in glyphs if g["role"] == "text"})
-    for offset in range(0, len(text_forms), 20):
-        blocks.append({"id": f"text-{offset}", "type": "paragraph", "children": [{"id": f"forms-{offset}", "type": "text", "text": " ".join(text_forms[offset:offset+20])}]})
+    for offset in range(0, len(text_forms), 8):
+        forms = text_forms[offset:offset+8]
+        blocks.append({"id": f"text-{offset}", "type": "paragraph", "children": [{"id": f"forms-{offset}", "type": "text", "text": "  ".join(" ".join([form] * 4) for form in forms)}]})
     math_forms = sorted({(g["role"], g["text"]) for g in glyphs if g["role"] != "text"})
-    for offset in range(0, len(math_forms), 12):
-        blocks.append({"id": f"math-{offset}", "type": "display_math", "expression": {"type": "row", "items": [{"type": "symbol", "role": role, "value": text} for role, text in math_forms[offset:offset+12]]}})
+    for offset in range(0, len(math_forms), 4):
+        blocks.append({"id": f"math-{offset}", "type": "display_math", "expression": {"type": "row", "items": [{"type": "symbol", "role": role, "value": text} for role, text in math_forms[offset:offset+4] for _ in range(4)]}})
     if not blocks:
         return None
     return validate_document({"schema_version": "1.0", "document_id": profile["profile_id"] + "-training-calibration", "content_mode": "literal", "blocks": blocks, "unresolved_inputs": []})
@@ -169,7 +172,7 @@ def _error(stage, exc):
 
 def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
                   observations: Path | None = None, calibration_document: Path | dict | None = None,
-                  document: Path | dict | None = None) -> dict:
+                  document: Path | dict | None = None, mine: bool = False) -> dict:
     """Import, learn from reviewed observations, persist, and calibrate locally.
 
     Existing current profiles are resumed. Raw photos alone result in
@@ -248,6 +251,16 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
     run_dir = default_data_dir() / "training" / profile_id / current["profile_version"]
     run_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     calibration_source = calibration_input or _specimen_document(current)
+    diversity = profile_diversity(current, target or calibration_source)
+    mining = {"status": "not_requested"}
+    if mine:
+        from .mining import mine_candidates
+        characters = "".join(dict.fromkeys(r["text"] for r in diversity["collection_requests"]))
+        try:
+            mining = mine_candidates(current, None, run_dir / "candidate-review", characters=characters or None)
+        except (InkformError, OSError, ValueError, ImportError) as exc:
+            diagnostics.append(_error("sample_mining", exc))
+            mining = {"status": "failed", "diagnostic": _error("sample_mining", exc)}
     calibration_readiness = _readiness(current, calibration_source) if calibration_source else {"ready": False, "status": "no_reviewed_forms"}
     calibration_kind = "document" if calibration_readiness.get("renderable") else "atlas" if learned else "unavailable"
     calibration = {"kind": calibration_kind, "status": "planned" if learned else "unavailable", "planned_pdf_path": str(run_dir / ("calibration.pdf" if calibration_kind == "document" else "profile-atlas.pdf")) if learned else None,
@@ -259,9 +272,10 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
         "status": status, "sample_count": sample_count, "source_count": len(current["sources"]),
         "reviewed_glyph_count": len(learned), "geometry_status_counts": dict(Counter(g["geometry_status"] for g in current["glyphs"])),
         "stages": copy.deepcopy(stages), "imports": imports, "measurements": measurements, "coverage": _inventory(current),
+        "diversity": diversity, "sample_mining": mining,
         "document_readiness": readiness, "calibration": copy.deepcopy(calibration), "report_path": str(run_dir / "training-report.json"),
         "uncertainties": list(measurements["uncertainties"]),
-        "next_action": "Inspect the samples and supply labeled, reviewed vector observations; importing photos alone does not train forms." if status == "awaiting_observations" else "Compare proposed geometry with its exact source evidence and record label/geometry review." if status == "needs_geometry_review" else "Inspect the calibration PDF and an actual-size print; preflight each requested document before rendering."}
+        "next_action": "Inspect the samples and supply labeled, reviewed vector observations; importing photos alone does not train forms." if status == "awaiting_observations" else "Compare proposed geometry with its exact source evidence and record label/geometry review." if status == "needs_geometry_review" else "Review the diversity requests and mined candidates, retain distinct source forms, then repeat calibration and actual-PDF repetition checks. Inspect an actual-size print separately."}
     profile_path = save_profile(current)
     if learned:
         try:
@@ -280,6 +294,7 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
         "sample_count": sample_count, "source_count": len(current["sources"]), "reviewed_glyph_count": len(learned),
         "default_render_mode": mode, "stages": stages, "coverage": current["training"]["coverage"],
         "document_readiness": readiness, "calibration": calibration, "measurements": measurements,
+        "diversity": diversity, "sample_mining": mining,
         "diagnostics": diagnostics, "imports": imports, "next_action": current["training"]["next_action"], "report_path": str(run_dir / "training-report.json")}
     report_path = Path(report["report_path"])
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")

@@ -389,6 +389,7 @@
         "stroke_order_status": {"$ref": "#/$defs/strokeOrder"},
         "reviewed_by": {"type": ["string", "null"], "minLength": 1},
         "fill_rule": {"const": "evenodd"},
+        "variation_dimensions_observed": {"type": "boolean"},
         "outline_calibration": {
           "type": "object",
           "required": ["body_x_height_mm"],

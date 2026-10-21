@@ -74,6 +74,22 @@ def test_roles_and_derived_outlines_do_not_inflate_sample_count(profile):
     assert roles["text"]["variant_count"] == roles["math.variable"]["variant_count"] == 1
 
 
+def test_crop_chosen_dimensions_are_not_learned_as_natural_symbol_variation(profile):
+    add_glyph(profile, 'natural-arrow', text='→', role='math.operator', width=2.)
+    for index, width in enumerate((2.8, 3.5, 6.)):
+        glyph = add_glyph(profile, f'axis-donor-{index}', text='→', role='math.operator', width=width)
+        glyph['variation_dimensions_observed'] = False
+    result = measure_style(profile)
+    assert result['variation_update'] is None
+    assert len(result['variation_dimension_exclusions']) == 3
+    # The compatible shapes remain available and their geometry is reported.
+    assert result['accepted_glyph_records'] == 4
+    add_glyph(profile, 'another-natural-arrow', text='→', role='math.operator', width=2.2)
+    learned = measure_style(profile)['variation_update']['by_glyph'][0]
+    assert learned['source_count'] == 2
+    assert set(learned['glyph_ids']) == {'natural-arrow', 'another-natural-arrow'}
+
+
 def test_no_samples_and_single_samples_do_not_imply_a_distribution(profile):
     result = measure_style(profile)
     assert result["measurements"]["glyph_width_xheight"]["status"] == "unavailable"

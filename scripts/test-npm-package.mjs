@@ -35,11 +35,16 @@ try {
   const report = JSON.parse(command(binary, ['render', join(examples, 'math.json'), '--profile', join(examples, 'synthetic-profile.json'), '--output', pdf]));
   assert.equal(report.ok, true);
   assert.ok(existsSync(pdf));
-  const check = JSON.parse(command(binary, ['check', pdf]));
+  const check = JSON.parse(command(binary, ['check', pdf, '--manifest', join(temporary, 'demo.build.json')]));
   assert.equal(check.ok, true);
   assert.equal(check.handwriting_raster_objects, 0);
   assert.equal(check.font_text_operators, 0);
   assert.ok(check.vector_path_count > 0);
+  assert.equal(check.repetition.geometry_source, 'emitted_pdf_vector_paths');
+  assert.equal(check.repetition.exact_count, 0);
+  assert.equal(check.repetition.near_count, 0);
+  const diversity = JSON.parse(command(binary, ['profile', 'diversity', join(examples, 'synthetic-profile.json'), '--document', join(examples, 'math.json')]));
+  assert.ok(diversity.groups.some(group => group.requested_occurrences > 1));
   const correctionsPdf = join(temporary, 'corrections.pdf');
   command(binary, ['render', join(examples, 'corrections.json'), '--profile', join(examples, 'synthetic-profile.json'), '--output', correctionsPdf]);
   const corrections = JSON.parse(readFileSync(join(temporary, 'corrections.build.json'), 'utf8'));

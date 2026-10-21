@@ -101,6 +101,33 @@ def _integer(row, field, minimum=0):
     return value
 
 
+def _retain_dimension_exclusion(glyph, observation, source_sha, previous):
+    """Keep a reviewed source-context restriction, never a geometry approval.
+
+    Regenerating the same cropped axis arrow does not turn its chosen shaft
+    length into observed operator dimensions. A different mask, source, crop,
+    label or role must establish its own restriction and review.
+    """
+    old_glyphs, old_observations, old_sources = previous
+    old = old_glyphs.get(glyph["glyph_id"])
+    if (not old or old.get("variation_dimensions_observed") is not False
+            or old.get("source_refs") != glyph["source_refs"]
+            or any(old.get(key) != glyph.get(key) for key in ("text", "role", "representation"))):
+        return
+    old_observation = old_observations.get(observation["observation_id"], {})
+    old_source = old_sources.get(old_observation.get("source_id"), {})
+    if (old_source.get("sha256") != source_sha
+            or any(old_observation.get(key) != observation.get(key)
+                   for key in ("source_id", "mask_sha256", "bbox_xywh", "manifest_observation_id"))):
+        return
+    # This conservative exclusion stays meaningful while replacement
+    # geometry is awaiting review, including repeated regeneration passes.
+    glyph["variation_dimensions_observed"] = False
+    for key in ("role_transfer", "natural_length_status", "source_context"):
+        if isinstance(old.get(key), str) and old[key].strip():
+            glyph[key] = old[key]
+
+
 def _style_observation(manifest, row, identity, sources, images, manifest_sha):
     """Preserve explicit source layout/count review; never infer it from crops."""
     kind = row.get("kind")
@@ -180,6 +207,9 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
             profile[field] = copy.deepcopy(base_profile[field])
     profile["calibration_status"] = "unreviewed"
     sources = {}; observations = []; records = []; images = {}; identifiers = set()
+    previous = tuple({row[key]: row for row in (base_profile or {}).get(collection, [])}
+                     for collection, key in (("glyphs", "glyph_id"), ("observations", "observation_id"),
+                                             ("sources", "source_id")))
     # Preserve the manifest itself as provenance, without treating its strings
     # as commands or labels recognized automatically from the photograph.
     manifest_sha, manifest_copy = _copy_evidence(manifest_path, "manifests")
@@ -264,6 +294,7 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
                     glyph = smooth_outline_glyph(glyph)
                 except ValueError as error:
                     glyph["refinement_warning"] = str(error)
+            _retain_dimension_exclusion(glyph, observation, source_sha, previous)
             records.append({"candidate_id": glyph["glyph_id"], "observation_id": observation_id,
                 "manifest_observation_id": identity, "text": text, "role": role,
                 "mask_sha256": mask_sha, "geometry_sha256": glyph["geometry_sha256"],
@@ -308,13 +339,22 @@ def import_observations(manifest_path: Path, base_profile: dict | None = None,
         "review_required": reviewed < len(records), "review_directory": str(build), "review_path": str(review_path),
         "manifest_sha256": manifest_sha, "source_path": str(manifest_copy),
         "smoothing_failures": [r["candidate_id"] for r in records if "refinement_warning" in r["geometry"]]}
+    for index, record in enumerate(records, 1):
+        # Compact atlas IDs refer unambiguously to full evidence/geometry IDs in
+        # candidates.json, even when a caller supplies a very long source ID.
+        record["contact_sheet_id"] = f"C{index:04d}"
     _write_json(build / "candidates.json", {"algorithm": OBSERVATION_IMPORT_VERSION, "candidates": records})
     _write_json(build / "style-observations.json", {"observations": [observation for observation in observations if observation["kind"] != "glyph"]})
     if not review_path.exists():
         _write_json(review_path, {"instructions": "Approve only after comparing source and geometry; each decision requires both exact hashes and reviewed_by.", "reviews": {}})
-    # Give each representation a distinct contact-sheet label while retaining
-    # the real observation ID in the profile and source references.
-    contacts = [dict(record, observation_id=record["manifest_observation_id"]+"."+record["geometry"]["representation"]) for record in records]
+    # Contact-sheet labels fit their cells; printed code points also keep signs
+    # unambiguous when the host's small diagnostic font lacks a Unicode glyph.
+    contacts = []
+    for record in records:
+        form = "outline" if record["geometry"]["representation"] == "clean_outline" else "stroke"
+        text = record["text"] if record["text"].isascii() else " ".join(f"U+{ord(c):04X}" for c in record["text"])
+        contacts.append(dict(record, text=text, observation_id=record["contact_sheet_id"]+" "+form,
+                             geometry_status=record["geometry_status"]+" | candidates.json:"+record["contact_sheet_id"]))
     write_contact_sheets(contacts, build)
     validate_profile(profile)
     if base_profile:

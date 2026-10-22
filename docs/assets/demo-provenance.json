@@ -8,24 +8,24 @@
   "pen_width_mm": 0.38,
   "width_profile": "constant",
   "variation": {
-    "amount": 0.1,
-    "basis": "authored alternate constructions plus bounded occurrence estimates"
+    "mode": "observed",
+    "basis": "unchanged authored reference forms; real bank reuse reported"
   },
   "word_pattern_audit": {
-    "status": "pass",
+    "status": "review_needed",
     "compared_words": 8,
-    "repeated_word_count": 0
+    "repeated_word_count": 4
   },
   "comparison": {
     "source": "direct layout of authored public reference constructions",
     "output": "actual renderer; no private profile or input",
-    "word_pattern_status": "pass",
+    "word_pattern_status": "review_needed",
     "repeated_word_comparisons": 9,
-    "repeated_word_count": 0,
-    "geometry_hash": "f3e06d73fd76e7a34966ced8cae069316f9e6e19907a85bb7313fa10fed86988"
+    "repeated_word_count": 3,
+    "geometry_hash": "5fc3c47ea6c987c5067e5572d786c803bc0480a3e89f7d10f35205384004eb47"
   },
   "corrections": "explicit authored examples; no fabricated sample habit",
-  "geometry_hash": "61f0dc05b60fe8d17f67bd030a03e5e90efa37a3543ebbb018e910f1e741324f",
+  "geometry_hash": "43ee543dc2f638647e45baad2ddef99bae41c64141fe73811a40994647441aab",
   "artifacts": [
     "handwriting.svg",
     "mathematics.svg",

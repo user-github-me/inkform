@@ -76,6 +76,9 @@ class Shaper:
         self.forms, self.variant_history, self.variant_choices = {}, {}, {}
         self.history, self.word_history, self.current_page, self.nonces = {}, {}, 0, dict(nonces or {})
         self.used_families = {}
+        self.observed_source_uses, self.observed_source_recency = Counter(), {}
+        self.observed_sequence = 0
+        self.excluded_derived_count = 0
         self.word_targets = {}
         self.page_hints = page_hints or {}
         self.observations = {entry["observation_id"]: entry for entry in profile.get("observations", [])}
@@ -84,6 +87,9 @@ class Shaper:
         representation = "centerline" if mode == "fresh_strokes" else "clean_outline"
         for glyph in accepted_glyphs(profile):
             if glyph["representation"] == representation or glyph["role"] == "mark.correction":
+                if self.variation.observed_only and glyph.get("derivation"):
+                    self.excluded_derived_count += 1
+                    continue
                 self.forms.setdefault((glyph["role"], glyph["text"]), []).append(glyph)
         for key, forms in self.forms.items():
             # One crop renamed or smoothed three times is still one example.
@@ -173,6 +179,8 @@ class Shaper:
             forms = [form for form in compatible_size if abs(self.profile["pen"]["width_mm"] - form["outline_calibration"].get("pen_width_mm", form["outline_calibration"].get("effective_width_mm", -1))) <= 0.01]
             if not forms:
                 raise InkformError("outline_pen_incompatible", "Changing the pen model cannot change a filled outline's thickness; select a reviewed compatible variant.", {"role": role, "text": text, "requested_pen_width_mm": self.profile["pen"]["width_mm"]})
+        if self.variation.observed_only:
+            return self.observed_glyph(forms, text, role, token_id, size, word_id or token_id, position)
         # Ink identity crosses semantic roles: text x and mathematical x
         # still must not reuse the same visible form on neighboring pages.
         history_key = text
@@ -256,6 +264,53 @@ class Shaper:
         box.advance = max(box.advance - left, box.bounds[2] + 0.035 * size)
         return box
 
+    def observed_glyph(self, forms, text, role, token_id, size, word_id, position):
+        """Use the full real bank before returning to an earlier source form.
+
+        No contour candidate search is involved: an exhausted source bank is
+        finite evidence, not permission to manufacture a new shape. Recency
+        and counts cross semantic roles that share the same visible character.
+        """
+        families = {form["glyph_id"]: source_family(form, self.observations) for form in forms}
+        def usage(form):
+            return self.observed_source_uses[(text, families[form["glyph_id"]])]
+        least_usage = min(usage(form) for form in forms)
+        candidates = [form for form in forms if usage(form) == least_usage]
+        if len(candidates) > 1:
+            last = max((self.observed_source_recency.get((text, families[form["glyph_id"]]), -1)
+                        for form in forms), default=-1)
+            if last >= 0:
+                candidates = [form for form in candidates if self.observed_source_recency.get(
+                    (text, families[form["glyph_id"]]), -1) != last]
+        index = min(len(candidates)-1, int(stable_value(self.seed, token_id, "observed-source") * len(candidates)))
+        source = candidates[index]
+        family = families[source["glyph_id"]]
+        key = (text, family)
+        prior_uses = self.observed_source_uses[key]
+        self.observed_source_uses[key] += 1
+        self.observed_source_recency[key] = self.observed_sequence
+        self.observed_sequence += 1
+        factors = self.variation.factors(source, token_id, word_id, position,
+                                         independent_forms=len(set(families.values())))
+        factors.update(source_family=family, source_geometry_hash=geometry_family(source),
+                       source_use_index=prior_uses+1, source_reused=bool(prior_uses),
+                       derived_form_count=0, candidate_count=len(candidates),
+                       selection="balanced_observations_without_immediate_reuse")
+        item = {"token_id": token_id, "glyph_id": source["glyph_id"], "text": text, "role": role,
+                "representation": source["representation"],
+                "strokes": map_strokes(source["strokes"], self.variation.transform(source, factors, size)),
+                "pen_width_mm": self.profile["pen"]["width_mm"], "nominal_size_mm": size,
+                "source_refs": copy.deepcopy(source["source_refs"]), "semantic": True, "variation": factors}
+        # Keep the same history contract as experimental rendering. It supports
+        # page-aware diagnostics, but never causes source paths to be altered.
+        self.history.setdefault(text, []).append({"token_id": token_id, "page": self.current_page,
+                                                  "descriptor": shape_descriptor(item)})
+        box = Box(source["advance"] * size, [item])
+        left = min(0, box.bounds[0])
+        box = box.shifted(-left)
+        box.advance = max(box.advance-left, box.bounds[2]+.035*size)
+        return box
+
     def text(self, text, role, token_id, size=None):
         if f"{token_id}:0" in self.page_hints:
             self.commit_page(self.page_hints[f"{token_id}:0"], [])
@@ -268,7 +323,7 @@ class Shaper:
                 if len(current) >= 3:
                     words.append(("".join(letters[i] for i in current), current))
                 current = []
-        comparable = role == "text" and self.variation.amount
+        comparable = role == "text" and self.variation.amount and not self.variation.observed_only
         repeated = comparable and any(self.word_history.get(word) for word, _ in words)
         previous_targets = self.word_targets
         self.word_targets = {}
@@ -376,6 +431,8 @@ class Shaper:
         vertical_scale = min(1, max(self.size * 0.08, (bottom - top) * 0.70) / max(mark_height, 1e-9))
         mark.items[0]["strokes"] = map_strokes(mark.items[0]["strokes"], lambda x, y: (left - overhang + (x - bounds[0]) * (right - left + 2 * overhang) / span, center_y + (y - (bounds[1] + bounds[3]) / 2) * vertical_scale))
         mark.items[0]["construction"] = "extended_reviewed_crossout"
+        mark.items[0]["variation"].update(source_shape_preserved=False,
+                                          source_geometry_transform="fit_reviewed_crossout_to_deleted_text")
         for box, part, semantic in ((old, "deleted", False), (mark, "mark", False), (new, "replacement", True)):
             for item in box.items:
                 item.update(semantic=semantic, correction_id=identity, correction_part=part)
@@ -405,6 +462,8 @@ class Shaper:
             raise InkformError("invalid_primitive", "The reviewed fraction-bar form has no horizontal extent.")
         box.items[0]["strokes"] = map_strokes(box.items[0]["strokes"], lambda x, py: ((x - bounds[0]) * width / span, py - (bounds[1] + bounds[3]) / 2 + y))
         box.items[0]["construction"] = "extended_writer_minus"
+        box.items[0]["variation"].update(source_shape_preserved=False,
+                                         source_geometry_transform="extend_writer_bar_to_expression_width")
         box.advance = width
         return box
 
@@ -456,6 +515,8 @@ class Shaper:
             target_top = bb[1] - size * 0.30
             target_bottom = bb[3]
             radical.items[0]["strokes"] = map_strokes(radical.items[0]["strokes"], lambda x, y: (x, target_top + (y - rb[1]) * (target_bottom - target_top) / (rb[3] - rb[1])))
+            radical.items[0]["variation"].update(source_shape_preserved=False,
+                                                 source_geometry_transform="fit_radical_to_radicand_height")
             x = radical.advance + size * 0.05
             bar = self.bar(body.advance + size * 0.15, target_top, token_id + ".bar", size).shifted(x)
             return Box(x + body.advance + size * 0.15, radical.items + body.shifted(x).items + bar.items)
@@ -554,11 +615,16 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
                     box = box_or_offset if text is None else shaper.text(text, "text", f"{run_token_id}:{box_or_offset}")
                     if text is not None and sampled_rate and len(clusters(text)) > 1 and regex.search(r"\p{L}", text) and stable_value(seed, f"{run_token_id}:{box_or_offset}", "sampled-correction") < sampled_rate:
                         original = box
+                        source_state = (shaper.observed_source_uses.copy(), shaper.observed_source_recency.copy(),
+                                        shaper.observed_sequence, {key: list(value) for key, value in shaper.history.items()})
                         box = shaper.correction(text, text, f"{run_token_id}:{box_or_offset}", "sampled_restart", replacement_box=original)
                         if max(box.advance, box.bounds[2]) - min(0, box.bounds[0]) > available:
                             # Optional sample-derived texture must not make a
                             # previously printable word become unbreakable.
                             shaper.corrections.pop()
+                            if shaper.variation.observed_only:
+                                (shaper.observed_source_uses, shaper.observed_source_recency,
+                                 shaper.observed_sequence, shaper.history) = source_state
                             box = original
                     for item in box.items:
                         item.update(content_node_id=run["id"], block_id=block["id"])
@@ -579,7 +645,39 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
     if len(set(token_ids)) != len(token_ids) or rendered != expected:
         raise InkformError("content_accounting_failed", "The shaped geometry must account for every required symbol in its exact role.", {"required": len(needed), "rendered": len(instances), "missing": [{"role": role, "text": text, "count": count} for (role, text), count in (expected - rendered).items()], "unexpected": [{"role": role, "text": text, "count": count} for (role, text), count in (rendered - expected).items()]})
     geometry_hash = hashlib.sha256(json.dumps(instances, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "graphs": getattr(shaper, "graphs", []), "variation": {"version": "inkform-occurrence-2", "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}}
+    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "graphs": getattr(shaper, "graphs", []), "variation": {"version": "inkform-occurrence-3", "mode": shaper.variation.mode, "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}, "source_usage": _source_usage(instances, shaper)}
+
+
+def _source_usage(instances, shaper):
+    """Collection guidance from actual visible selections, not novelty claims."""
+    groups = {}
+    for item in instances:
+        factors = item.get("variation", {})
+        if not factors.get("source_family"):
+            continue
+        key = (item["role"], item["text"])
+        record = groups.setdefault(key, {"role": key[0], "text": key[1], "occurrences": 0,
+                                        "available_source_forms": 0, "families": Counter()})
+        record["occurrences"] += 1
+        record["available_source_forms"] = max(record["available_source_forms"], factors["independent_form_count"])
+        record["families"][factors["source_family"]] += 1
+    records = []
+    for key in sorted(groups):
+        record = groups[key]
+        families = record.pop("families")
+        record.update(selected_source_forms=len(families), reused_occurrences=sum(count-1 for count in families.values()),
+                      selected_glyph_ids=sorted({item["glyph_id"] for item in instances if (item["role"], item["text"]) == key}))
+        records.append(record)
+    requests = [{"role": row["role"], "text": row["text"], "available_source_forms": row["available_source_forms"],
+                 "occurrences": row["occurrences"], "reused_occurrences": row["reused_occurrences"],
+                 "action": "Collect and review more distinct occurrences from the writer's original samples."}
+                for row in records if row["reused_occurrences"]]
+    return {"mode": shaper.variation.mode, "excluded_derived_forms": shaper.excluded_derived_count,
+            "selection": "balanced_observations_without_immediate_reuse" if shaper.variation.observed_only else "experimental_novelty_search",
+            "observed_form_usage_evaluated": shaper.variation.observed_only,
+            "reused_occurrences": sum(row["reused_occurrences"] for row in records) if shaper.variation.observed_only else None,
+            "groups": records, "collection_requests": requests,
+            "note": "Source inventory counts are not a uniqueness claim. The independent ink and word audits measure the actual output."}
 
 
 def plan_document(document, profile, seed=72, mode=None):
@@ -587,15 +685,16 @@ def plan_document(document, profile, seed=72, mode=None):
     nonces, page_hints = {}, {}
     for attempt in range(3):
         plan = _plan_document_once(document, profile, seed, mode, nonces, page_hints)
-        report = audit_repetition(plan["instances"], policy={"amount": plan["variation"]["amount"], "strict_near": True})
+        variation_mode = plan["variation"]["mode"]
+        report = audit_repetition(plan["instances"], policy={"amount": plan["variation"]["amount"], "strict_near": True, "mode": variation_mode})
         plan["repetition"] = report
-        words = audit_word_patterns(plan["instances"], amount=plan["variation"]["amount"])
+        words = audit_word_patterns(plan["instances"], amount=plan["variation"]["amount"], mode=variation_mode)
         plan["word_patterns"] = words
         plan["variation"]["audit_passes"] = attempt+1
         failures = [pair for pair in report.get("pairs", []) if pair["category"] in {"exact", "near"}]
-        if report["unchecked_instances"] and plan["variation"]["amount"]:
+        if report["unchecked_instances"] and (variation_mode == "observed" or plan["variation"]["amount"]):
             raise InkformError("repetition_audit_incomplete", "Some rendered ink could not be measured; strict non-repetition has not been verified.", {"repetition": report})
-        if plan["variation"]["amount"] == 0 or not (report["exact_count"] or report["near_count"] or report["unchecked_instances"] or words["repeated_word_count"]):
+        if variation_mode == "observed" or plan["variation"]["amount"] == 0 or not (report["exact_count"] or report["near_count"] or report["unchecked_instances"] or words["repeated_word_count"]):
             return plan
         # A word is provisionally shaped before we know whether its line spills
         # onto another page. Reuse actual positions on the next pass so stale
@@ -614,7 +713,7 @@ def plan_document(document, profile, seed=72, mode=None):
             if distance < pair["threshold_mm"]:
                 item = by_token[token]
                 missing[(item["role"], item["text"])] += 1
-    raise InkformError("repetition_exhausted", "The reviewed style envelope cannot supply sufficiently different forms or word constructions for this page and its neighbor. Mine more samples or synthesize and review writer-conditioned variants of the listed letters and symbols, then render again.",
+    raise InkformError("repetition_exhausted", "Experimental novelty checks exhausted the reviewed bank. Collect more real samples of the listed letters and symbols, or use observed mode to preserve source geometry and report reuse honestly.",
                        {"repetition": report, "word_patterns": words, "attempted_passes": 3,
                         "repeated_words": sorted({pair["text"] for pair in words["pairs"]}),
                         "needed_samples": [{"role": role, "text": text, "conflicting_pairs": count} for (role,text),count in missing.items()]})

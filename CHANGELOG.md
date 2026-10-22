@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — 2026-10-22
+
+- Make observed source forms the default: exclude synthesized forms, contour warps, interpolation, and invented letter or arrow curves from ordinary output. Preserve internal construction while rotating real reviewed occurrences.
+- Prefer source fidelity when samples are sparse. Keep repeated-letter and repeated-word findings visible for review, and allow faithful reuse when the real bank is exhausted.
+- Search all available reviewed character templates across preserved pages during training. Keep candidates proposed until source labels, crop context, and fitted geometry are reviewed; report collection gaps honestly.
+- Update the skill and website prompt to collect variants throughout the user's actual writing corpus. Experimental synthesis remains separate and requires an explicit request.
+
 ## 0.4.0 — 2026-10-22
 
 - Propose alternate letter constructions from the writer's reviewed forms with `profile synthesize` and `train --synthesize`. Complete PDF/PNG review atlases and exact-hash decisions keep inferred variants separate from observed evidence.

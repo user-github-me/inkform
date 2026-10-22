@@ -14,7 +14,9 @@ from inkform.variation import OccurrenceVariation
 
 @pytest.fixture
 def profile():
-    return load_profile(Path(__file__).resolve().parents[1] / "examples" / "synthetic-profile.json")
+    result = load_profile(Path(__file__).resolve().parents[1] / "examples" / "synthetic-profile.json")
+    result.setdefault("variation", {})["mode"] = "experimental"
+    return result
 
 
 def assert_distinct(plan):
@@ -116,7 +118,7 @@ def test_simple_marks_keep_meaning_and_report_their_limited_shape_space(profile)
 
 def test_maximum_smooth_field_preserves_orientation(profile):
     glyph = next(g for g in profile["glyphs"] if (g["role"], g["text"]) == ("text", "n"))
-    profile["variation"] = {"amount": .3}
+    profile["variation"] = {"mode": "experimental", "amount": .3}
     variation = OccurrenceVariation(profile, 31)
     epsilon = 1e-5
     for occurrence in range(30):

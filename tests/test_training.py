@@ -82,6 +82,23 @@ def test_training_mines_private_candidates_without_approving_them(inputs):
     assert Path(trained['report_path']).is_file()
 
 
+def test_default_training_collects_all_templates_without_a_candidate_quota(inputs, monkeypatch):
+    from inkform import mining
+    calls = []
+    def collect(profile, samples, destination, **options):
+        calls.append((profile, samples, options))
+        return {"status": "proposals_only", "candidate_count": 0}
+    monkeypatch.setattr(mining, 'mine_candidates', collect)
+    result = train_profile(inputs['samples'], 'all-source-writer')
+    assert result['ok']
+    assert len(calls) == 1
+    assert calls[0][1] is None  # All preserved pages, not just the new folder.
+    assert calls[0][2] == {'per_label': None}  # No document-only character filter.
+    calls.clear()
+    train_profile(inputs['samples'], 'all-source-writer', mine=False)
+    assert not calls
+
+
 def test_default_training_calibration_exercises_repeated_forms(inputs):
     writer = approved_writer(inputs, 'repeat-calibration')
     trained = train_profile(inputs['samples'], writer, observations=inputs['manifest'])
@@ -90,7 +107,9 @@ def test_default_training_calibration_exercises_repeated_forms(inputs):
     assert document['blocks'][0]['children'][0]['text'] == 'o o o o'
     checked = json.loads(Path(trained['calibration']['report_path']).read_text())
     assert checked['repetition']['geometry_source'] == 'emitted_pdf_vector_paths'
-    assert checked['repetition']['exact_count'] == checked['repetition']['near_count'] == 0
+    # With one real form, report its reuse instead of inventing new curves.
+    assert checked['repetition']['exact_count'] + checked['repetition']['near_count'] == 6
+    assert checked['repetition']['status'] == 'review_needed'
 
 
 def test_training_synthesis_is_review_queue_not_automatic_evidence(inputs):

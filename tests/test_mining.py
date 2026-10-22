@@ -94,6 +94,39 @@ def test_representations_do_not_inflate_template_bank(writer, tmp_path):
     assert report["unsupported_characters"] == ["q"]
 
 
+def test_full_collection_retains_all_matches_without_weakening_review(writer, tmp_path):
+    profile, _ = writer
+    samples, _ = new_samples(tmp_path)
+    bounded = mine_candidates(profile, samples, tmp_path/"bounded", characters="n", per_label=2, min_score=.72)
+    full = mine_candidates(profile, samples, tmp_path/"all", characters="n", per_label=None, min_score=.72)
+    assert bounded["candidate_count"] == 2
+    assert full["candidate_count"] == full["matched_component_count"] == 4
+    assert full["scanned_page_count"] == full["source_count"] == 1
+    assert full["collection_mode"] == "all_qualified" and full["per_label"] is None
+    candidates = json.loads(Path(full["candidates"]).read_text())["candidates"]
+    assert all(row["score"] >= .72 and row["label_status"] == "proposed" for row in candidates)
+    assert full["accepted_glyph_count"] == 0
+    assert not accepted_glyphs(import_observations(Path(full["manifest"])))
+    expected = Path(full["candidates"]).read_bytes()
+    repeated = mine_candidates(profile, samples, tmp_path/"all", characters="n", per_label=None, min_score=.72)
+    assert expected == Path(repeated["candidates"]).read_bytes()
+
+
+def test_full_collection_counts_unmatched_connected_ink(writer, tmp_path):
+    profile, _ = writer
+    samples = tmp_path/"samples"; samples.mkdir()
+    page = Image.new("L", (400, 160), 255)
+    draw_n(page, 40, 40)
+    draw = ImageDraw.Draw(page)
+    draw.ellipse((190, 40, 260, 70), outline=0, width=5)
+    page.save(samples/"mixed.png")
+    report = mine_candidates(profile, samples, tmp_path/"all", characters="n", per_label=None, min_score=.90)
+    assert report["matched_component_count"] == 1
+    assert report["unmatched_component_count"] == 1
+    assert report["counters"]["whole_components"] == 2
+    assert any("whole-word" in note for note in report["limitations"])
+
+
 def test_mining_uses_preserved_source_paths_and_reports_zero_new_forms(writer, tmp_path):
     profile, original = writer
     original.unlink()

@@ -2,7 +2,8 @@
 
 The graph specification is the semantic authority. This module does not infer a
 function, read a graph photograph, or manufacture numerical coordinates. Small
-pen deviations are estimates and retain every supplied data anchor exactly.
+pen deviations are experimental estimates. Normal mode retains the explicit
+plot geometry and real writer labels/arrows without adding random curvature.
 """
 from __future__ import annotations
 
@@ -281,7 +282,8 @@ def graph_box(spec, shaper, token_id):
         return [padding + (point[0] - xmin) / (xmax - xmin) * (width - 2 * padding),
                 height - padding - (point[1] - ymin) / (ymax - ymin) * (height - 2 * padding)]
 
-    strength = shaper.variation.strength
+    observed_only = shaper.variation.observed_only
+    strength = 0 if observed_only else shaper.variation.strength
     amplitude = min(.14, .085 * strength)
     learned_style = validate_graph_style(shaper.profile)
     pen = learned_style["pen_width_xheight"] * shaper.size if learned_style else shaper.profile["pen"]["width_mm"]
@@ -292,10 +294,12 @@ def graph_box(spec, shaper, token_id):
               "style": {"version": "inkform-graph-1", "pen_width_mm": pen,
                         "pen_basis": "reviewed_graph_ink_width" if learned_style else "writer_profile",
                         "source_refs": style_refs, "arrow_basis": "reviewed_writer_glyphs",
-                        "axis_bow_basis": "reviewed_static_graph_extent" if learned_style else "bounded_estimate",
+                        "axis_bow_basis": "explicit_graph_geometry" if observed_only else "reviewed_static_graph_extent" if learned_style else "bounded_estimate",
                         "axis_bow_xheight": copy.deepcopy(learned_style["axis_bow_xheight"]) if learned_style else None,
-                        "estimated_axes": ["bow_direction", "within_extent_path", "curve_deviation", "marker_shape"],
-                        "curve_deviation_basis": "bounded_estimate", "maximum_control_deviation_mm": amplitude,
+                        "estimated_axes": [] if observed_only else ["bow_direction", "within_extent_path", "curve_deviation", "marker_shape"],
+                        "mode": shaper.variation.mode,
+                        "curve_deviation_basis": "none" if observed_only else "bounded_estimate", "maximum_control_deviation_mm": amplitude,
+                        "source_fidelity": "writer labels, original arrow shapes, measured pen width; plot curves follow the explicit graph specification",
                         "data_anchors": "preserved_exactly", "curve_interpolation": "explicit_specification"}}
 
     def signed(identity, domain):
@@ -309,7 +313,8 @@ def graph_box(spec, shaper, token_id):
                 "content_kind": "graph_primitive", "graph_id": token_id, "graph_kind": kind, "graph_element_id": name,
                 "graph_data_anchors": copy.deepcopy(data_anchors), "graph_plot_anchors_mm": [mapped(p) for p in data_anchors],
                 "source_refs": copy.deepcopy(style_refs), "source_geometry_hash": hashlib.sha256(json.dumps(geometry, sort_keys=True).encode()).hexdigest(),
-                "variation": {"basis": "bounded_estimate", "amount": shaper.variation.amount}}
+                "variation": {"basis": "explicit_graph_geometry" if observed_only else "bounded_estimate",
+                              "mode": shaper.variation.mode, "amount": shaper.variation.amount}}
         result.items.append(item); ledger["primitive_token_ids"].append(identity)
         return item
 

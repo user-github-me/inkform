@@ -6,7 +6,7 @@ Coordinates are x-height units, baseline y=0, positive y downward. Bounds always
 
 Each stroke has `start`, `segments`, and optional `closed` and `width_profile`. A segment is a `line` with `end`, or a `cubic` with `control1`, `control2`, and `end`. Width-profile samples contain normalized arc-length `s` and a multiplier; positions increase from 0 through 1. Outlines are closed contours with even-odd fill and explicit physical calibration. A path is neither an embedded image nor an inferred time series.
 
-Only forms with both `label_status: reviewed` and `geometry_status: reviewed` and a named `reviewed_by` enter coverage. Personal forms retain references to stored source IDs. `proposed` and `rejected` candidates remain available for diagnosis. `dynamics` retains unknown timing, pressure, and stroke order for photographs.
+Only forms with both `label_status: reviewed` and `geometry_status: reviewed` and a named `reviewed_by` enter coverage. In the default observed mode, derived forms are excluded even when reviewed. Personal forms retain references to stored source IDs. `proposed` and `rejected` candidates remain available for diagnosis. `dynamics` retains unknown timing, pressure, and stroke order for photographs.
 
 The prototype adapter writes a private `candidates.json`, paired review PNGs, and `review.json`. Each review entry is keyed by `observation_id` and includes the matching `mask_sha256`, `geometry_sha256`, `label_status`, `geometry_status`, and `reviewed_by`. Inspect the pairs before recording decisions. Unmatched hashes invalidate acceptance; rerun `profile import-prototype --update` after editing the review ledger.
 
@@ -16,7 +16,9 @@ Initial scale and pen values are calibration choices, not measurements establish
 
 ## Variation and correction evidence
 
-`variation.learned` records the model with `version: "inkform-variation-1"` and `basis: "reviewed_samples"`. Its `by_glyph` rows contain `role`, `text`, relative `width` and `height` amplitudes, `source_count`, `glyph_ids`, and `observation_ids`. A row needs at least two distinct reviewed source occurrences of that form; repeated representations or aliases do not count twice. Width and height amplitudes are bounded at 0.15 and 0.12. Missing evidence uses a conservative rendering estimate rather than an invented learned distribution.
+`variation.mode` is `observed` by default, including when absent from an older profile. It selects reviewed source forms, excludes `derivation` records, and preserves their internal geometry. Uniform scale and layout placement remain available; interpolation, shape warps, and invented letter or arrow curves are disabled. `experimental` explicitly enables the earlier deformation and derived-form behavior. Save the choice with `profile preferences my-writing --variation-mode observed|experimental`. The normal workflow uses observed mode.
+
+`variation.learned` records the model with `version: "inkform-variation-1"` and `basis: "reviewed_samples"`. Its `by_glyph` rows contain `role`, `text`, relative `width` and `height` amplitudes, `source_count`, `glyph_ids`, and `observation_ids`. A row needs at least two distinct reviewed source occurrences of that form; repeated representations or aliases do not count twice. Width and height amplitudes are bounded at 0.15 and 0.12. Missing evidence stays a reported gap; observed rendering does not invent an internal shape distribution.
 
 A glyph may set `variation_dimensions_observed: false` when its width/height reflects a crop choice or a context transfer rather than an observed standalone form. Training retains its reviewed shape but excludes it from learned dimensional variation, and reports the excluded IDs. Document the reason and role transfer; a cropped graph-axis segment does not measure the writer's natural tends-arrow length.
 
@@ -26,10 +28,11 @@ hash, and separate review status. Their `source_refs` equal the union of the
 recorded parents; `independent_observation_count` is zero and
 `variation_dimensions_observed` is false. Parents must be reviewed source forms
 of the same character, role, and representation, never other generated forms.
-Use the synthesis/review CLI to maintain these bindings. Reviewed derived forms
-are available for rendering but cannot inflate measured sample counts.
+Use the synthesis/review CLI to maintain these bindings only for an explicitly
+requested experiment. Reviewed derived forms are available in experimental
+mode, excluded from observed mode, and cannot inflate measured sample counts.
 
-At least three reviewed adjacent word gaps across two lines inform `word_gap` (bounded at 0.25), `word_gap_sample_count`, and `word_gap_observation_ids`. A zero sample count means unavailable evidence, not measured uniform spacing. See [observations.md](observations.md) for source hashes and layout-review requirements. `variation.amount` is optional, from 0 through 0.3, with default 0.1. It scales bounded learned and estimated amplitudes; zero disables geometric transforms while genuine variant selection remains available. Slant, baseline, and shape-warp axes remain estimated even when width and height are learned.
+At least three reviewed adjacent word gaps across two lines inform `word_gap` (bounded at 0.25), `word_gap_sample_count`, and `word_gap_observation_ids`. A zero sample count means unavailable evidence, not measured uniform spacing. See [observations.md](observations.md) for source hashes and layout-review requirements. `variation.amount` is optional, from 0 through 0.3, with default 0.1. Zero disables per-occurrence transforms while genuine source selection remains available. Observed mode restricts transforms to uniform scale and layout placement regardless of amount. Experimental slant and shape-warp axes remain estimates even when width and height statistics come from samples.
 
 `corrections` records `rate`, `basis`, `sampled_word_count`, `correction_count`, `observation_ids`, and `source_refs`. Personal learning uses `basis: "reviewed_samples"`; only authored public fixtures use `synthetic_demo`. The rate is bounded at 0.35 and is derived from reviewed representative passage counts, independently of the correction-mark geometry. No frequency evidence means no inferred habit. A reviewed mark alone can support an explicitly supplied document correction without establishing a rate.
 
@@ -46,7 +49,10 @@ hash, reviewed actor/status, crop `bbox_xywh`, `xheight_px`, `pen_width_px`, and
 `axes` with `orientation` and absolute source `trace_px` points. Validation
 recomputes perpendicular deviation from each endpoint chord and aggregates
 the reviewed measurements. Record static ink width only, not inferred pressure.
-The graph renderer scales this reviewed style while keeping data anchors fixed.
+Observed graph rendering uses the reviewed pen width and explicit graph
+geometry without added axis bow. Experimental rendering can use the reviewed
+bow extent, with new direction/path choices still identified as estimates.
+Both modes keep the supplied data anchors fixed.
 
 To retain an actual mode preference, create an immutable version. Omit the feedback field until feedback exists; record the user's words accurately rather than inventing approval. This example saves only the mode:
 

@@ -190,7 +190,12 @@ def render_document(document, profile, output, seed=72, mode=None, *, preview_dp
                 os.replace(artifact, output.parent / artifact.name)
     return {"ok": True, "pdf": str(output), "pages": plan["page_count"], "previews": previews,
             "manifest": str(output.with_suffix(".build.json")), "report": str(output.with_suffix(".report.json")),
-            "geometry_hash": plan["geometry_hash"], "unresolved_inputs": manifest["unresolved_inputs"], "synthetic_profile": profile["synthetic"]}
+            "geometry_hash": plan["geometry_hash"], "unresolved_inputs": manifest["unresolved_inputs"], "synthetic_profile": profile["synthetic"],
+            "variation_mode": plan["variation"]["mode"],
+            "source_reuse": {"reused_occurrences": plan["source_usage"]["reused_occurrences"],
+                             "collection_requests": plan["source_usage"]["collection_requests"]},
+            "ink_repetition": {key: report["repetition"][key] for key in ("status", "exact_count", "near_count", "geometry_source")},
+            "word_repetition": {key: report["word_patterns"][key] for key in ("status", "repeated_word_count", "geometry_source")}}
 
 
 def profile_preview(profile, output):

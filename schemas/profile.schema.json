@@ -52,6 +52,11 @@
     "variation": {
       "type": "object",
       "properties": {
+        "mode": {
+          "enum": ["observed", "experimental"],
+          "default": "observed",
+          "description": "Observed preserves reviewed source forms. Experimental explicitly enables generated forms and shape deformation."
+        },
         "amount": {
           "$ref": "#/$defs/relativeAmplitude"
         },

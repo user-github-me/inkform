@@ -8,11 +8,11 @@ Inkform is an open-source Python engine and agent skill for learning reusable pr
 
 This is a working **0.4 implementation**, with a profile importer, reviewed vector geometry, semantic layout, a command-line interface, and actual PDF checks. Personal resemblance and print quality still need calibration. It is not a fully automatic photo-to-handwriting model.
 
-Version 0.4 adds writer-conditioned letter proposals, a stronger check for repeated whole-word constructions, remembered correction preferences, and graphs with the writer's labels, arrowheads, and source-reviewed axis style. Generated variants require visual review and never count as additional photographed samples.
+Version 0.4.1 puts source fidelity first: ordinary output uses the writer's real reviewed forms, with no synthesized letters, extra curves, contour warps, or blended constructions. The agent collects more actual variants from the supplied pages. Repetition checks identify where the source bank needs more variety; they no longer force invented shapes when the evidence is sparse. Remembered correction preferences and graphs with the writer's labels, arrowheads, and source-reviewed axis style remain available.
 
 Inkform includes sample-first training, portable reviewed observations, smooth cubic outline refinement, and 300 dpi previews. A writer can choose `default_render_mode: clean_outline` to retain fuller, sample-derived forms. An explicit `--mode` overrides that preference. The PDF itself remains vector at every preview resolution.
 
-The renderer now checks the actual visible shapes of repeated letters and symbols on the same and adjacent pages. It rotates distinct reviewed forms, varies smooth geometry, and changes arrow shafts and heads separately. Exact and near copies of ordinary forms block export; the engine reports when the available shape range is insufficient. Simple dots and straight bars have a separately reported limited range. The profile learns from distinct reviewed examples where available; sparse evidence uses a conservative estimate. Reviewed correction habits can add crossed-out word restarts at a rate learned from sample passages, using the writer's own strike or scribble geometry.
+The renderer checks the actual visible shapes of repeated letters and symbols on the same and adjacent pages. It selects distinct reviewed source occurrences before reusing them, preserving their internal construction. More source examples provide more real alternatives; a small bank may repeat, and the report makes that visible. Uniform size and layout placement can change without inventing new letter shapes. Reviewed correction habits can add crossed-out word restarts at a rate learned from sample passages, using the writer's own strike or scribble geometry.
 
 ## Install with npm
 
@@ -58,7 +58,7 @@ inkform train --id my-writing --samples ./writing-samples
 # The agent reviews sample forms and their fitted geometry, then resumes:
 inkform train --id my-writing --samples ./writing-samples \
   --observations ./reviewed-observations.json \
-  --calibration-document calibration.json --document document.json --mine --synthesize
+  --calibration-document calibration.json --document document.json
 inkform render document.json --profile my-writing --output build/notes.pdf
 ```
 
@@ -66,11 +66,11 @@ Training learns a private library of the writer's own fitted curves and variants
 
 Once calibrated, the profile is reused for new documents. Additional samples improve it through immutable versions. If a requested symbol is missing, the workflow uses more evidence from the supplied pages or requests a targeted sample. It does not fill the gap with generic handwriting. Resemblance, spacing, and printed appearance are evaluated separately; export validity alone is not a handwriting-match score.
 
-Include multiple occurrences of frequent letters and symbols, ordinary word spacing, and representative passages containing any corrections. The agent reviews the forms, word boxes, and correction counts separately. This distinguishes the writer's actual range from one repeated crop or a collection containing only their messiest words. See [observation evidence](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/observations.md) for the manifest format.
+Use all supplied pages, including preserved samples from earlier imports. The agent inventories inspected pages and pending candidates, collects usable distinct occurrences of letters, numbers, signs, arrows, and corrections, and reviews their word context. Collection continues beyond a single example per character. Word spacing and representative correction counts are reviewed separately. This distinguishes the writer's actual range from one repeated crop or a collection containing only their messiest words. See [observation evidence](https://github.com/user-github-me/inkform/blob/main/skills/inkform/references/observations.md) for the manifest format.
 
-`profile diversity` identifies overused forms and counts physically distinct reviewed shapes. `profile mine` searches preserved pages for more examples using the writer's own masks and writes a private queue with source context. Candidates require label and geometry review; they are not automatically accepted. The skill repeats collection, calibration, actual-PDF checking, and visual inspection until the requested document passes or an evidence gap remains. More samples help when they contain genuinely different forms.
+`profile diversity` identifies overused forms and counts physically distinct reviewed shapes. Training normally searches all preserved pages using the available reviewed character templates; `--no-mine` skips that optional scan. `profile mine` runs a focused search and writes a private queue with source context. Candidates require label and geometry review; they are not automatically accepted. The miner does not recognize an entirely new alphabet or separate every joined letter, so agent inspection remains necessary. The skill repeats collection, calibration, actual-PDF checking, and visual inspection, and reports unreviewed material and evidence gaps honestly.
 
-When a character has too few examples, `profile synthesize` proposes alternate constructions from its accepted writer forms. Inspect the complete source/proposal PDF atlas and record exact-hash decisions. The agent can perform this review as part of the skill workflow; new styles remain identified as inferred estimates. Repeated prose words are compared after removing letter scale and shear, so changing only spacing or slant cannot hide repeated constructions.
+The default `observed` variation mode excludes previously synthesized forms and disables internal shape deformation. If existing samples cannot provide another real occurrence, it reuses the closest available form and reports repetition. Missing characters still need source evidence. Experimental synthesis remains available only as a separately requested experiment; it is not the fallback for sparse personal samples. Repeated-word checks remain useful diagnostics, and a low repetition count is not a resemblance score.
 
 ## Personal profiles
 
@@ -80,10 +80,7 @@ inkform profile inspect my-writing --preview build/profile.pdf
 inkform profile coverage my-writing --document document.json
 inkform profile diversity my-writing --document document.json
 inkform profile mine my-writing --characters 'nemr→' --output ./build/private-review
-inkform profile synthesize my-writing --characters 'ab1exist' --output ./build/style-review
-# Inspect the review PDF/PNGs and fill explicit decisions in review.json first.
-inkform profile review-variants ./build/style-review/proposal-profile.json \
-  --review ./build/style-review/review.json
+inkform profile preferences my-writing --variation-mode observed
 inkform profile preferences my-writing --corrections sampled
 inkform render document.json --profile my-writing --seed 72 --output build/personal.pdf
 
@@ -117,12 +114,12 @@ See the [agent skill](https://github.com/user-github-me/inkform/blob/main/skills
 
 ## Current limits
 
-- Both modes use deterministic source-family rotation and bounded shape variation. Repeated-form measurements inform width and height; estimated variation remains labeled. Reviewed synthesized variants can change construction while preserving source parent references and outline topology. Geometric checks cannot alone establish letter identity; visual review rejects misleading shapes. Photo-derived paths do not recover real pen pressure, timing, or order.
+- Both ink representations support observed source selection, with reproducible seeds and no invented internal letter geometry by default. A finite source bank can repeat; collecting more distinct actual occurrences improves its range. Experimental deformation and reviewed synthesis require an explicit experimental variation mode. Geometric checks cannot alone establish letter identity; visual review rejects inaccurate traces. Photo-derived paths do not recover real pen pressure, timing, or order.
 - Cross-outs need a reviewed correction mark. Automatic placement additionally needs a correction rate counted from representative sample passages; importing photographs or isolated marks alone does not establish that habit. Corrections are text restarts, not generated wrong answers.
 - Clean outlines preserve the observed ink shape and can be the writer's default. Their thickness is baked into their geometry. Uncalibrated size changes, scripts, and scalable outline primitives are rejected.
 - Outline refinement fits continuous cubic curves with bounded movement while preserving detached marks, holes, containment, and ink area. New candidates need geometric review; old profile snapshots remain available. Changing the PNG preview DPI does not smooth the PDF's geometry.
 - Unrefined centerlines can remain angular. Reviewed consecutive word boxes can inform word-gap variation; connected cursive, learned within-word kerning, automatic page/perspective measurement, universal OCR segmentation, advanced math, and tablet capture are future work.
-- Actual PDF parsing checks physical page size, vector paths, image absence, safe bounds, every-page rasterization, emitted glyph/word constructions, and graph anchors. Same/adjacent-page duplicates and near copies fail for ordinary forms; simple punctuation has a separate limited-range report. A bounded candidate search can return `repetition_exhausted` on dense content with too little approved variety. Similarity to the writer, transcription/answers, and printed readability still require review.
+- Actual PDF parsing checks physical page size, vector paths, image absence, safe bounds, every-page rasterization, emitted glyph/word constructions, and graph anchors. Same/adjacent-page duplicates and near copies remain reported in observed mode; they do not force deformation or block otherwise valid output. Experimental mode retains strict repetition failures. Similarity to the writer, transcription/answers, and printed readability still require review.
 - Coverage is specific to each writer's reviewed samples. Missing forms fail coverage; Inkform never silently inserts a font.
 
 ## Contributing and license

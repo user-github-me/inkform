@@ -174,12 +174,15 @@ def compare_words(first, second, *, threshold_mm=STRUCTURAL_THRESHOLD_MM):
             "baseline_rhythm_distance": round(float(np.mean(np.abs(first["baseline"]-second["baseline"]))), 7)}
 
 
-def audit_word_patterns(instances, *, amount=None, adjacent_pages=1):
+def audit_word_patterns(instances, *, amount=None, adjacent_pages=1, mode="experimental"):
     """Recalculate repeated lexical word constructions from visible paths."""
     if not isinstance(adjacent_pages, int) or isinstance(adjacent_pages, bool) or not 0 <= adjacent_pages <= 2:
         raise ValueError("Word history must cover zero, one or two adjacent pages")
+    if mode not in {"observed", "experimental"}:
+        raise ValueError("Word-pattern mode must be observed or experimental")
     words, ungrouped = _word_groups(instances)
     report = {"version": "inkform-word-patterns-1", "status": "pass", "adjacent_pages": adjacent_pages,
+              "mode": mode, "enforcement": "report_source_reuse" if mode == "observed" else "strict_novelty",
               "metric": "affine_normalized_letter_ink_boundary_distance_mm",
               "threshold_mm": STRUCTURAL_THRESHOLD_MM, "minimum_changed_fraction": MINIMUM_CHANGED_FRACTION,
               "scope": "repeated prose words of at least three letters/digits on the same and adjacent pages; mathematical functions retain the physical glyph audit",
@@ -207,10 +210,10 @@ def audit_word_patterns(instances, *, amount=None, adjacent_pages=1):
                                             "second_token_ids": [i["token_id"] for i in word["items"]], **comparison})
         history[word["text"]] = previous+[(word, descriptor)]
     report["truncated"] = report["repeated_word_count"] > len(report["pairs"])
-    if isinstance(amount, (int, float)) and not isinstance(amount, bool) and amount == 0:
+    if mode != "observed" and isinstance(amount, (int, float)) and not isinstance(amount, bool) and amount == 0:
         report["status"] = "opted_out"
     elif report["repeated_word_count"]:
-        report["status"] = "fail"
+        report["status"] = "review_needed" if mode == "observed" else "fail"
     elif ungrouped:
         report["status"] = "partial" if words else "not_checked"
     return report

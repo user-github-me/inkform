@@ -1,8 +1,8 @@
-"""Seeded variation of reviewed forms without independent point noise.
+"""Source-faithful placement, with deformation available only experimentally.
 
-Whole-contour fields preserve shared boundaries and counters. Distinct reviewed
-forms can be blended only when their contour topology agrees. That interpolation
-is sample backed; the small residual shape field is explicitly an estimate.
+Normal rendering retains the selected observation's curves and proportions.
+The older estimated contour fields are kept behind an explicit experimental
+mode; they do not stand in for missing examples of a writer's handwriting.
 """
 from __future__ import annotations
 
@@ -97,6 +97,10 @@ class OccurrenceVariation:
     def __init__(self, profile, seed):
         self.seed = seed
         settings = profile.get("variation", {})
+        self.mode = settings.get("mode", "observed")
+        if self.mode not in {"observed", "experimental"}:
+            raise ValueError("Variation mode must be observed or experimental")
+        self.observed_only = self.mode == "observed"
         self.amount = float(settings.get("amount", 0.1))
         self.strength = max(0.0, min(self.amount / 0.1, 3.0))
         self.learned = settings.get("learned", {})
@@ -110,6 +114,22 @@ class OccurrenceVariation:
         math_form = role.startswith("math.")
         entry = self.by_glyph.get((role, text))
         identity = token_id if attempt == 0 else f"{token_id}\0candidate-{attempt}"
+        if self.observed_only:
+            # Uniform writing-size conversion and translation preserve every
+            # original control point, counter, arrowhead and stroke width.
+            # Position is an estimate; it is never advertised as a new form.
+            baseline = min(.025, self.strength * (.006 if math_form else .018)) * self.signed(identity, "baseline")
+            return {
+                "version": "inkform-occurrence-3", "mode": self.mode, "amount": self.amount,
+                "basis": "observed_source_geometry", "estimated_axes": ["baseline_placement"],
+                "width": 1., "height": 1., "shear": 0., "pen_width": 1.,
+                "pen_width_basis": "profile_pen" if glyph["representation"] == "centerline" else "reviewed_outline",
+                "baseline_x_height": baseline, "bow_x_height": 0., "bend_x_height": 0.,
+                "shape_field_x_height": [0.] * 6, "arrow_shape": {},
+                "source_shape_preserved": True, "independent_form_count": independent_forms,
+                "candidate_attempt": attempt, "sample_glyph_ids": [glyph["glyph_id"]],
+                "sample_observation_ids": [ref["observation_id"] for ref in glyph.get("source_refs", []) if "observation_id" in ref],
+            }
         width_amplitude = min(0.18, self.strength * (entry["width"] if entry else (0.11 if math_form else 0.085)))
         height_amplitude = min(0.14, self.strength * (entry["height"] if entry else (0.05 if math_form else 0.065)))
         slant_amplitude = min(0.10, self.strength * (0.028 if math_form else 0.055))
@@ -130,7 +150,7 @@ class OccurrenceVariation:
                        for key, limit, amount in (("head_length", .24, .15), ("upper_opening", .25, .18), ("lower_opening", .25, .18))} if arrow else {}
         pen_width = 1 + min(.04, self.strength*.025)*self.signed(identity, "pen-width") if glyph["representation"] == "centerline" else 1.
         return {
-            "version": "inkform-occurrence-2", "amount": self.amount,
+            "version": "inkform-occurrence-2", "mode": self.mode, "amount": self.amount,
             "basis": "reviewed_samples" if entry else "conservative_estimate",
             "estimated_axes": ["slant", "baseline", "shape_warp"] if entry else ["width", "height", "slant", "baseline", "shape_warp"],
             "width": width, "height": height, "shear": shear, "pen_width": pen_width,
@@ -144,6 +164,8 @@ class OccurrenceVariation:
 
     @staticmethod
     def transform(glyph, factors, size):
+        if factors.get("mode") == "observed":
+            return lambda x, y: (size * x, size * (y + factors["baseline_x_height"]))
         left, top, right, bottom = glyph["ink_bounds"]
         cx, cy = (left + right) / 2, (top + bottom) / 2
         # A common, bounded spatial scale avoids huge derivatives in thin

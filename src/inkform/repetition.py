@@ -371,20 +371,26 @@ class RepetitionIndex:
 def audit_repetition(instances, *, policy=None):
     """Recompute geometry diagnostics; never trust stored variation/novelty IDs.
 
-    ``policy`` accepts ``threshold_mm``, ``adjacent_pages`` and ``amount``. An
+    ``policy`` accepts ``threshold_mm``, ``adjacent_pages``, ``amount`` and ``mode``. An
     explicit numeric zero amount is the only repetition opt-out. Optional
     ``strict_near`` (default true) rejects unresolved nontrivial near matches. Exact copies
-    always fail except for the declared zero-variation opt-out.
+    fail in strict experimental mode. Explicit observed mode measures the same
+    ink and reports source reuse for review, without demanding invented shapes.
     """
     policy = policy or {}
     if not isinstance(policy, dict):
         raise ValueError("Repetition policy must be an object")
     if "strict_near" in policy and not isinstance(policy["strict_near"], bool):
         raise ValueError("strict_near must be a boolean")
+    mode = policy.get("mode", "experimental")
+    if mode not in {"observed", "experimental"}:
+        raise ValueError("Repetition mode must be observed or experimental")
     index = RepetitionIndex(threshold_mm=policy.get("threshold_mm", NEAR_THRESHOLD_MM),
                             adjacent_pages=policy.get("adjacent_pages", 1))
-    opted_out = _finite(policy.get("amount")) and policy["amount"] == 0
-    report = {"version": "inkform-ink-repetition-1", "status": "pass", "scope": "same visible text across semantic roles on the same and adjacent pages",
+    opted_out = mode != "observed" and _finite(policy.get("amount")) and policy["amount"] == 0
+    report = {"version": "inkform-ink-repetition-1", "status": "pass", "mode": mode,
+              "enforcement": "report_source_reuse" if mode == "observed" else "strict_novelty",
+              "scope": "same visible text across semantic roles on the same and adjacent pages",
               "grid_mm": GRID_MM, "threshold_mm": index.threshold_mm, "adjacent_pages": index.adjacent_pages,
               "opt_out": "explicit_zero_variation" if opted_out else None,
               "metric": "symmetric_mean_ink_boundary_distance_mm",
@@ -425,10 +431,12 @@ def audit_repetition(instances, *, policy=None):
     report["truncated"] = report["pair_count"] > len(report["pairs"])
     if opted_out:
         report["status"] = "opted_out"
-    elif report["exact_count"] or policy.get("strict_near", True) and report["near_count"]:
+    elif mode == "experimental" and (report["exact_count"] or policy.get("strict_near", True) and report["near_count"]):
         report["status"] = "fail"
     elif report["unchecked_instances"]:
         report["status"] = "partial" if report["checked_instance_count"] else "not_checked"
+    elif report["exact_count"] or policy.get("strict_near", True) and report["near_count"]:
+        report["status"] = "review_needed" if mode == "observed" else "fail"
     elif report["near_count"] or report["limited_count"]:
         report["status"] = "review_needed"
     return report

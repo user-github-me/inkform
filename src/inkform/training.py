@@ -22,7 +22,7 @@ from .ingest import import_prototype, import_samples
 from .layout import plan_document
 from .measurements import measure_style
 from .profiles import (
-    accepted_glyphs, coverage, default_data_dir, load_profile, merge_profile,
+    accepted_glyphs, renderable_glyphs, coverage, default_data_dir, load_profile, merge_profile,
     next_profile_version, resolve_render_mode, save_profile, validate_profile,
 )
 
@@ -114,7 +114,7 @@ def _merge_evidence(existing: dict, incoming: dict) -> tuple[dict, dict]:
 def _inventory(profile) -> dict:
     result = {}
     for representation in ("centerline", "clean_outline"):
-        glyphs = [g for g in accepted_glyphs(profile) if g["representation"] == representation]
+        glyphs = [g for g in renderable_glyphs(profile) if g["representation"] == representation]
         forms = Counter((g["role"], g["text"]) for g in glyphs)
         result[representation] = {"reviewed_glyph_count": len(glyphs), "unique_form_count": len(forms),
             "roles": {role: sorted({text for candidate_role, text in forms if candidate_role == role}) for role in sorted({role for role, _ in forms})},
@@ -152,7 +152,7 @@ def _readiness(profile, document) -> dict:
 def _specimen_document(profile):
     """Exercise repeated known forms, never invent a transcription of samples."""
     representation = "centerline" if resolve_render_mode(profile) == "fresh_strokes" else "clean_outline"
-    glyphs = [g for g in accepted_glyphs(profile) if g["role"] != "mark.correction" and g["representation"] == representation and len(clusters(g["text"])) == 1 and not g["text"].isspace()]
+    glyphs = [g for g in renderable_glyphs(profile) if g["role"] != "mark.correction" and g["representation"] == representation and len(clusters(g["text"])) == 1 and not g["text"].isspace()]
     blocks = []
     text_forms = sorted({g["text"] for g in glyphs if g["role"] == "text"})
     for offset in range(0, len(text_forms), 8):
@@ -172,7 +172,7 @@ def _error(stage, exc):
 
 def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
                   observations: Path | None = None, calibration_document: Path | dict | None = None,
-                  document: Path | dict | None = None, mine: bool = False, synthesize: bool = False) -> dict:
+                  document: Path | dict | None = None, mine: bool = True, synthesize: bool = False) -> dict:
     """Import, learn from reviewed observations, persist, and calibrate locally.
 
     Existing current profiles are resumed. Raw photos alone result in
@@ -225,7 +225,7 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
             profile_path = save_profile(current)
         except (InkformError, OSError, ValueError, ImportError) as exc:
             diagnostics.append(_error(stage, exc))
-    learned = accepted_glyphs(current)
+    learned = renderable_glyphs(current)
     if "default_render_mode" not in current and learned:
         current["default_render_mode"] = "clean_outline" if any(g["representation"] == "clean_outline" for g in learned) else "fresh_strokes"
     measurements = measure_style(current)
@@ -255,9 +255,10 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
     mining = {"status": "not_requested"}
     if mine:
         from .mining import mine_candidates
-        characters = "".join(dict.fromkeys(r["text"] for r in diversity["collection_requests"]))
         try:
-            mining = mine_candidates(current, None, run_dir / "candidate-review", characters=characters or None)
+            # Scan the complete corpus and every reviewed template, even when
+            # the target document already has minimum character coverage.
+            mining = mine_candidates(current, None, run_dir / "candidate-review", per_label=None)
         except (InkformError, OSError, ValueError, ImportError) as exc:
             diagnostics.append(_error("sample_mining", exc))
             mining = {"status": "failed", "diagnostic": _error("sample_mining", exc)}
@@ -306,7 +307,9 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
     report = {"ok": not diagnostics, "profile_id": profile_id, "profile_version": current["profile_version"], "profile_path": str(profile_path),
         "training_status": status, "method": "local_reviewed_exemplar_learning", "neural_model": False,
         "sample_count": sample_count, "source_count": len(current["sources"]), "reviewed_glyph_count": len(learned),
-        "default_render_mode": mode, "stages": stages, "coverage": current["training"]["coverage"],
+        "default_render_mode": mode, "variation_mode": current.get("variation", {}).get("mode", "observed"),
+        "excluded_derived_glyph_count": sum(bool(g.get("derivation")) for g in accepted_glyphs(current)) if current.get("variation", {}).get("mode", "observed") == "observed" else 0,
+        "stages": stages, "coverage": current["training"]["coverage"],
         "document_readiness": readiness, "calibration": calibration, "measurements": measurements,
         "diversity": diversity, "sample_mining": mining, "style_synthesis": synthesis,
         "diagnostics": diagnostics, "imports": imports, "next_action": current["training"]["next_action"], "report_path": str(run_dir / "training-report.json")}

@@ -236,7 +236,9 @@ def test_giant_or_nonfinite_geometry_cannot_allocate_an_unbounded_raster():
 
 @pytest.fixture
 def profile():
-    return load_profile(Path(__file__).resolve().parents[1]/"examples"/"synthetic-profile.json")
+    result = load_profile(Path(__file__).resolve().parents[1]/"examples"/"synthetic-profile.json")
+    result.setdefault("variation", {})["mode"] = "experimental"
+    return result
 
 
 def test_final_pdf_audits_emitted_paths_without_embedding_written_text(tmp_path, profile):

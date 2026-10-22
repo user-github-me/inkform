@@ -21,9 +21,11 @@ inkform skill install --force
 ```
 
 Use the original `--path` for a custom skill location, then reload the agent.
-An older writer profile can use conservative occurrence variation immediately.
-To learn its personal range or add sampled cross-outs, resume training with
-the repeated-form and correction evidence described in [training.md](training.md).
+Profiles without an explicit variation mode now use `observed`: reviewed source
+forms remain intact, and older synthesized forms are excluded from output.
+Use `inkform profile preferences WRITER --variation-mode observed` to record that
+choice explicitly. To collect more actual variants or add sampled cross-outs,
+resume training with the evidence described in [training.md](training.md).
 
 You can also use `npx --yes @nazifbd/inkform setup` and `npx --yes @nazifbd/inkform skill install`. The npm package is scoped; its executable remains `inkform`. The copied skill contains its own runtime, so it does not depend on npm's temporary download directory remaining available. To set it up later, run `node runtime/bin/inkform.mjs setup` from the installed skill directory.
 

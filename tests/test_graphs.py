@@ -27,12 +27,12 @@ def spec():
             "labels": [{"id": "cost", "at": [0, 20], "text": "Cost", "offset_mm": [0, -2]}]}
 
 
-def shaper(seed=72, *, variation=0):
+def shaper(seed=72, *, variation=0, variation_mode="observed"):
     profile = load_profile(Path(__file__).parents[1] / "examples/synthetic-profile.json")
     profile = copy.deepcopy(profile)
     # These tests establish plotting semantics. Repetition policy is exercised
     # by its own tests; turn it on explicitly for the graph-variation test.
-    profile["variation"] = {"amount": variation}
+    profile["variation"] = {"amount": variation, "mode": variation_mode}
     return Shaper(profile, seed, "fresh_strokes", profile["physical_scale"]["body_x_height_mm"])
 
 
@@ -67,8 +67,8 @@ def test_arrowheads_keep_writer_pen_weight_and_are_rotated_not_stretched():
 
 def test_varying_a_graph_keeps_data_and_monotone_envelopes():
     graph = spec(); graph["axes"] = []; graph["labels"] = []; graph["markers"] = []
-    first = graph_box(graph, shaper(1, variation=.1), "chart")
-    second = graph_box(graph, shaper(2, variation=.1), "chart")
+    first = graph_box(graph, shaper(1, variation=.1, variation_mode="experimental"), "chart")
+    second = graph_box(graph, shaper(2, variation=.1, variation_mode="experimental"), "chart")
     a, b = first.items[0], second.items[0]
     assert a["strokes"] != b["strokes"]
     assert a["graph_plot_anchors_mm"] == b["graph_plot_anchors_mm"]
@@ -82,6 +82,38 @@ def test_varying_a_graph_keeps_data_and_monotone_envelopes():
             for axis in (0, 1):
                 assert (segment["control2"][axis] - segment["control1"][axis]) * (end[axis] - current[axis]) >= 0
             current = end
+
+
+def test_observed_mode_does_not_invent_axis_bow_curve_deviations_or_marker_shapes():
+    graph = spec()
+    one, two = shaper(1, variation=.3), shaper(2, variation=.3)
+    one.profile.update(observed_style()); two.profile.update(observed_style())
+    first, second = graph_box(graph, one, "chart"), graph_box(graph, two, "chart")
+    a = {item["token_id"]: item for item in first.items if item.get("content_kind") == "graph_primitive"}
+    b = {item["token_id"]: item for item in second.items if item.get("content_kind") == "graph_primitive"}
+    assert {key: value["strokes"] for key, value in a.items()} == {key: value["strokes"] for key, value in b.items()}
+    assert one.graphs[0]["style"]["estimated_axes"] == []
+    assert one.graphs[0]["style"]["maximum_control_deviation_mm"] == 0
+    assert one.graphs[0]["style"]["pen_basis"] == "reviewed_graph_ink_width"
+    assert one.graphs[0]["style"]["axis_bow_basis"] == "explicit_graph_geometry"
+
+
+def test_observed_graph_rejects_extra_bend_even_when_pdf_matches_manifest(tmp_path):
+    from inkform.layout import plan_document
+    from inkform.rendering import export_pdf
+    from inkform.validation import check_pdf
+
+    profile = shaper(variation=.3).profile
+    plan = plan_document(_marker_crossing_document(), profile)
+    axis = next(item for item in plan["instances"] if item["role"] == "graph.axis")
+    axis["strokes"][0]["segments"][0]["control1"][0] += .3
+    pdf = tmp_path / "invented-bend.pdf"
+    export_pdf(plan, profile, pdf, "invented bend")
+    plan["pdf_sha256"] = hashlib.sha256(pdf.read_bytes()).hexdigest()
+    report = check_pdf(pdf, plan, preview_dpi=36)
+    assert not report["ok"]
+    assert report["checks"]["emitted_graph_geometry"] == "fail"
+    assert any("invented bends" in error.get("reason", "") for error in report["errors"])
 
 
 def test_plateau_and_vertical_data_segments_do_not_gain_fake_extrema():

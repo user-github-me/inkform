@@ -200,6 +200,7 @@ def test_single_unbreakable_word_reports_overflow_without_scaling(profile):
 
 
 def test_geometry_is_deterministic_and_inserted_nodes_participate_in_repetition_checks(profile):
+    profile.setdefault("variation", {})["mode"] = "experimental"
     document = literal_document("A stable sentence.")
     first = plan_document(document, profile, seed=2)
     assert first == plan_document(document, profile, seed=2)

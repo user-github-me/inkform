@@ -451,6 +451,19 @@ def accepted_glyphs(profile: dict) -> list[dict]:
     return [glyph for glyph in profile["glyphs"] if glyph["label_status"] == "reviewed" and glyph["geometry_status"] == "reviewed" and reviewed_actor(glyph.get("reviewed_by"))]
 
 
+def renderable_glyphs(profile: dict) -> list[dict]:
+    """Use observed forms by default; keep experimental geometry in storage.
+
+    Reviewing an invented form does not make it an observation of the writer.
+    Historical profiles therefore gain the faithful default without deleting
+    either their source evidence or their previous review decisions.
+    """
+    glyphs = accepted_glyphs(profile)
+    if profile.get("variation", {}).get("mode", "observed") == "experimental":
+        return glyphs
+    return [glyph for glyph in glyphs if not glyph.get("derivation")]
+
+
 def coverage(profile: dict, requirements: Iterable[tuple[str, str]]) -> dict:
     """Count exact (role, text) coverage with no text/math role fallback."""
     required = Counter()
@@ -461,7 +474,7 @@ def coverage(profile: dict, requirements: Iterable[tuple[str, str]]) -> dict:
         if role not in ROLES or not isinstance(text, str) or not text:
             raise InkformError("invalid_requirements", "Glyph requirements need a supported role and nonempty text.")
         required[(role, text)] += 1
-    available = Counter((glyph["role"], glyph["text"]) for glyph in accepted_glyphs(profile))
+    available = Counter((glyph["role"], glyph["text"]) for glyph in renderable_glyphs(profile))
     missing = [{"role": role, "text": text, "count": count} for (role, text), count in required.items() if not available[(role, text)]]
     return {
         "complete": not missing,

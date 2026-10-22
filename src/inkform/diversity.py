@@ -1,7 +1,7 @@
 """Inventory independent source forms and prioritize further sample review.
 
-Collection targets are review hints, not a promise that a profile can synthesize
-unlimited unique writing. The rendered-page repetition audit makes that decision.
+Collection targets are review hints, not a promise of unlimited unique writing.
+Normal rendering uses real reviewed occurrences and reports remaining reuse.
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ def profile_diversity(profile: dict, document: dict | None = None, mode: str | N
     validate_profile(profile)
     mode = resolve_render_mode(profile, mode)
     representation = 'centerline' if mode == 'fresh_strokes' else 'clean_outline'
+    variation_mode = profile.get('variation', {}).get('mode', 'observed')
     observations = {o['observation_id']: o for o in profile.get('observations', [])}
     groups = defaultdict(list)
     for glyph in accepted_glyphs(profile):
@@ -68,6 +69,7 @@ def profile_diversity(profile: dict, document: dict | None = None, mode: str | N
         record = {'role': role, 'text': text, 'render_mode': mode,
                   'reviewed_records': len(glyphs), 'independent_source_observations': independent,
                   'reviewed_derived_forms': len(derived),
+                  'derived_forms_enabled': variation_mode == 'experimental',
                   'source_families': len(independent_forms), 'distinct_path_geometry': len(fingerprints),
                   'separated_shape_count': len(representatives), 'representative_glyph_ids': representatives,
                   'requested_occurrences': occurrences, 'collection_target_hint': target,
@@ -78,9 +80,9 @@ def profile_diversity(profile: dict, document: dict | None = None, mode: str | N
         if need_more:
             requests.append({'role': role, 'text': text, 'occurrences': occurrences,
                              'separated_shape_count': len(representatives), 'collection_target_hint': target,
-                             'action': 'Mine distinct source forms, or synthesize and review writer-conditioned variants when observed variety is sparse; keep derived forms separate from observations.'})
+                             'action': 'Collect and review more distinct occurrences from the writer\'s original samples. Preserve their shapes and report any remaining reuse.'})
     requests.sort(key=lambda r: (-r['occurrences'], r['role'], r['text']))
     return {'profile_id': profile['profile_id'], 'profile_version': profile['profile_version'],
-            'mode': mode, 'synthetic': profile['synthetic'], 'threshold_mm_at_3mm_xheight': NEAR_THRESHOLD_MM,
+            'mode': mode, 'variation_mode': variation_mode, 'synthetic': profile['synthetic'], 'threshold_mm_at_3mm_xheight': NEAR_THRESHOLD_MM,
             'groups': records, 'collection_requests': requests,
             'note': 'Shape separation and collection targets guide review; only an audit of the actual rendered pages can establish whether repeats remain.'}

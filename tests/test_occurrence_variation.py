@@ -16,7 +16,9 @@ from inkform.variation import OccurrenceVariation, stable_value
 
 @pytest.fixture
 def profile():
-    return load_profile(Path(__file__).resolve().parents[1] / "examples" / "synthetic-profile.json")
+    result = load_profile(Path(__file__).resolve().parents[1] / "examples" / "synthetic-profile.json")
+    result.setdefault("variation", {})["mode"] = "experimental"
+    return result
 
 
 def normalized(item):
@@ -67,7 +69,7 @@ def test_repeated_single_exemplar_n_differs_inside_same_word_and_seed_is_stable(
 
 
 def test_amount_zero_preserves_selected_geometry_and_baselines(profile):
-    profile["variation"] = {"amount": 0}
+    profile["variation"] = {"mode": "experimental", "amount": 0}
     plan = plan_document(literal_document("nnnn"), profile)
     assert len({json.dumps(normalized(item), sort_keys=True) for item in plan["instances"]}) == 1
     source = next(g for g in profile["glyphs"] if g["glyph_id"] == plan["instances"][0]["glyph_id"])
@@ -80,7 +82,7 @@ def test_learning_controls_sampled_axes_without_disabling_unsupported_gap_estima
     glyph = next(g for g in profile["glyphs"] if (g["role"], g["text"]) == ("text", "n"))
     # Contract-level test: the actual evidence references are independently
     # checked by the profile and learning tests before a profile can be shaped.
-    profile["variation"] = {"learned": {"by_glyph": [{"role": "text", "text": "n", "width": 0,
+    profile["variation"] = {"mode": "experimental", "learned": {"by_glyph": [{"role": "text", "text": "n", "width": 0,
         "height": .12, "glyph_ids": ["n-one", "n-two"], "observation_ids": ["one", "two"]}],
         "word_gap": 0, "word_gap_sample_count": 0}}
     variation = OccurrenceVariation(profile, 2)
@@ -124,7 +126,7 @@ def test_limit_arrows_vary_lengths_without_flipping_or_losing_signs(profile):
 
 
 def test_fraction_and_root_bars_still_span_variable_content_at_maximum_variation(profile):
-    profile["variation"] = {"amount": .3}
+    profile["variation"] = {"mode": "experimental", "amount": .3}
     expression = {"type": "fraction", "numerator": {"type": "number", "value": "123"},
                   "denominator": {"type": "root", "body": {"type": "number", "value": "1234"}}}
     document = literal_document("")
@@ -152,7 +154,7 @@ def test_maximum_variation_preserves_outline_counters_and_ink_extents(profile):
     ]
     glyph["ink_bounds"] = [0, -1, 1, 0]
     profile["glyphs"] = [glyph]
-    profile["variation"] = {"amount": 0.3}
+    profile["variation"] = {"mode": "experimental", "amount": 0.3}
     document = literal_document("nn nn nn nn nn nn nn nn")
     document["page"] = {"width_mm": 50, "height_mm": 45, "margins_mm": 8}
     plan = plan_document(document, profile, mode="clean_outline")
@@ -167,7 +169,7 @@ def test_maximum_variation_preserves_outline_counters_and_ink_extents(profile):
 @pytest.mark.parametrize("replacement", ["new word", ""])
 def test_explicit_correction_keeps_deleted_ink_out_of_semantic_counts(profile, replacement):
     profile = with_mark(profile)
-    profile["variation"] = {"amount": 0}  # This fixture tests exact semantic accounting.
+    profile["variation"] = {"mode": "experimental", "amount": 0}  # This fixture tests exact semantic accounting.
     document = correction_document(text=replacement)
     original = copy.deepcopy(document)
     plan = plan_document(document, profile)
@@ -200,7 +202,7 @@ def test_explicit_correction_checks_deleted_coverage_and_requires_reviewed_mark(
 
 def test_sampled_restarts_are_deterministic_and_require_habit_plus_reviewed_mark(profile):
     document = literal_document("small notes " * 8)
-    profile["variation"] = {"amount": 0}  # Restart policy is independent of allograph synthesis.
+    profile["variation"] = {"mode": "experimental", "amount": 0}  # Restart policy is independent of allograph synthesis.
     no_habit = with_mark(profile)
     assert not plan_document(document, no_habit)["corrections"]
     profile = with_mark(profile, .25)
@@ -242,7 +244,7 @@ def test_sampled_restart_that_cannot_fit_falls_back_to_the_original_word(profile
 
 def test_clean_outline_body_can_use_separate_centerline_crossout(profile):
     profile = with_mark(profile)
-    profile["variation"] = {"amount": 0}
+    profile["variation"] = {"mode": "experimental", "amount": 0}
     for glyph in profile["glyphs"]:
         if glyph["role"] != "mark.correction":
             glyph["representation"] = "clean_outline"
@@ -257,7 +259,7 @@ def test_clean_outline_body_can_use_separate_centerline_crossout(profile):
 def test_pdf_correction_sidecars_retain_source_and_account_for_vector_marks(profile, tmp_path):
     document = correction_document()
     profile = with_mark(profile)
-    profile["variation"] = {"amount": 0}  # Semantic sidecar/export contract, not diversity evidence.
+    profile["variation"] = {"mode": "experimental", "amount": 0}  # Semantic sidecar/export contract, not diversity evidence.
     result = render_document(document, profile, tmp_path / "correction.pdf", preview_dpi=72)
     assert result["ok"]
     manifest = json.loads((tmp_path / "correction.build.json").read_text())

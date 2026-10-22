@@ -174,11 +174,18 @@ def _isolate(image: Image.Image, component: dict, xheight: float) -> np.ndarray:
     return alpha * support
 
 
-def _select_diverse(rows: list[dict], maximum: int) -> list[dict]:
+def _select_diverse(rows: list[dict], maximum: int | None) -> list[dict]:
     """Quality-gated farthest sampling favors new shapes and source pages."""
     if not rows:
         return []
     remaining = sorted(rows, key=lambda row: (-row["score"], row["id"]))
+    if maximum is None:
+        # A full collection retains every qualified observation. Computing
+        # pairwise diversity would add quadratic cost without changing which
+        # evidence survives, so use stable quality order instead.
+        for row in remaining:
+            row["diversity_distance"] = None
+        return remaining
     chosen = [remaining.pop(0)]
     while remaining and len(chosen) < maximum:
         def utility(row):
@@ -223,7 +230,7 @@ def _contact_sheets(rows: list[dict], destination: Path) -> list[str]:
 
 def mine_candidates(profile: dict, samples_dir: Path | None, destination: Path, *,
                     characters: str | None = None, role: str | None = None,
-                    per_label: int = 24, min_score: float = .58) -> dict:
+                    per_label: int | None = 24, min_score: float = .58) -> dict:
     """Mine private page images into an importable, *unreviewed* crop manifest.
 
     With ``samples_dir=None``, use original photos preserved in the profile.
@@ -231,14 +238,16 @@ def mine_candidates(profile: dict, samples_dir: Path | None, destination: Path, 
     Scores are geometric similarity, not probabilities or recognition claims.
     ``observations.json`` can be imported immediately for geometry proposals;
     review its source context and estimated measurements before acceptance.
+    ``per_label=None`` keeps every qualified unique candidate across the full
+    corpus; it does not lower matching standards or accept any labels.
     """
     validate_profile(profile)
     if profile["synthetic"]:
         raise ValueError("Mining personal writing requires a personal profile with reviewed source evidence")
     if role is not None and role not in ROLES:
         raise ValueError("Unknown glyph role")
-    if not isinstance(per_label, int) or isinstance(per_label, bool) or not 1 <= per_label <= 500:
-        raise ValueError("per_label must be an integer from 1 to 500")
+    if per_label is not None and (not isinstance(per_label, int) or isinstance(per_label, bool) or not 1 <= per_label <= 500):
+        raise ValueError("per_label must be None or an integer from 1 to 500")
     if isinstance(min_score, bool) or not isinstance(min_score, (int, float)) or not math.isfinite(min_score) or not 0 < min_score <= 1:
         raise ValueError("min_score must lie in (0, 1]")
     if characters is not None and (not isinstance(characters, str) or not characters):
@@ -251,6 +260,8 @@ def mine_candidates(profile: dict, samples_dir: Path | None, destination: Path, 
     targets = [t for t in bank if characters is None or t["text"] in characters]
     if not targets:
         report = {"algorithm": MINING_VERSION, "status": "awaiting_templates", "source_count": 0,
+            "collection_mode": "all_qualified" if per_label is None else "bounded", "per_label": per_label,
+            "scanned_page_count": 0, "matched_component_count": 0, "unmatched_component_count": 0,
             "template_count": len(bank), "candidate_count": 0, "candidate_counts": {}, "accepted_glyph_count": 0,
             "manifest": str(destination/"observations.json"), "candidates": str(destination/"candidates.json"),
             "contact_sheets": [], "sources": [], "missing_template_evidence": missing,
@@ -314,6 +325,7 @@ def mine_candidates(profile: dict, samples_dir: Path | None, destination: Path, 
             best = int(np.argmax(scores)); template = bank[best]; score = float(scores[best])
             key = (template["text"], template["role"])
             if key not in target_keys or score < min_score or ratios[best] > .85:
+                counters["unmatched_components"] += 1
                 continue
             rivals = [float(scores[i]) for i, other in enumerate(bank) if other["text"] != template["text"]]
             margin = score-max(rivals) if rivals else None
@@ -325,7 +337,10 @@ def mine_candidates(profile: dict, samples_dir: Path | None, destination: Path, 
             if template["text"] in "ij:;=≠":
                 # Complete components cannot by themselves establish a
                 # detached dot or second sign stroke. Do not propose half.
-                counters["detached_component_role_skipped"] += 1; continue
+                counters["detached_component_role_skipped"] += 1
+                counters["unmatched_components"] += 1
+                continue
+            counters["matched_components"] += 1
             ink_height = component["ink_height_px"]
             xheight = ink_height / template["height_per_xheight"]
             baseline = 3 + ink_height * template["baseline_fraction"]
@@ -339,8 +354,9 @@ def mine_candidates(profile: dict, samples_dir: Path | None, destination: Path, 
                    "flags": flags, "measurement_status": "estimated from matched local template; review before acceptance",
                    "component_id": component["component_id"], "_signature": component["signature"], "_component": component}
             page_rows.append(row)
-        # Bound work and disk use before writing full-resolution candidate
-        # evidence. Selection per page keeps all pages represented later.
+        # Numeric limits bound disk use while retaining page diversity. Full
+        # collection writes every match so smaller handwriting families are
+        # not lost behind a global per-character quota.
         by_key = defaultdict(list)
         for row in page_rows:
             by_key[(row["text"], row["role"])].append(row)
@@ -382,6 +398,9 @@ def mine_candidates(profile: dict, samples_dir: Path | None, destination: Path, 
     sheets = _contact_sheets(distinct, destination)
     counts = Counter(f"{row['role']}:{row['text']}" for row in distinct)
     report = {"algorithm": MINING_VERSION, "status": "proposals_only", "source_count": len(scanned),
+        "collection_mode": "all_qualified" if per_label is None else "bounded", "per_label": per_label,
+        "scanned_page_count": len(scanned), "matched_component_count": counters["matched_components"],
+        "unmatched_component_count": counters["unmatched_components"],
         "template_count": len(bank), "candidate_count": len(distinct), "candidate_counts": dict(counts),
         "accepted_glyph_count": 0, "manifest": str(destination/"observations.json"),
         "candidates": str(destination/"candidates.json"), "contact_sheets": sheets, "sources": scanned,
@@ -389,7 +408,7 @@ def mine_candidates(profile: dict, samples_dir: Path | None, destination: Path, 
         "unsupported_characters": sorted(set(characters or "")-{t["text"] for t in targets}),
         "unmatched_labels": sorted(f"{role}:{text}" for text, role in target_keys if f"{role}:{text}" not in counts),
         "limitations": ["Shape matching cannot establish a character or its mathematical role.",
-            "Connected words, detached marks and ambiguous components require explicit crop review.",
+            "Connected words, detached marks and ambiguous components require manual whole-word and source-context review; component counts do not mean all writing was recognized.",
             "Baselines and x-heights are estimates transferred from the closest reviewed example.",
             "Source orientation and scan perspective remain uncalibrated.",
             "Visually inspect for copies submitted in differently transformed photographs."]}

@@ -34,6 +34,7 @@ try {
   const pdf = join(temporary, 'demo.pdf');
   const report = JSON.parse(command(binary, ['render', join(examples, 'math.json'), '--profile', join(examples, 'synthetic-profile.json'), '--output', pdf]));
   assert.equal(report.ok, true);
+  assert.equal(report.variation_mode, 'observed');
   assert.ok(existsSync(pdf));
   const check = JSON.parse(command(binary, ['check', pdf, '--manifest', join(temporary, 'demo.build.json')]));
   assert.equal(check.ok, true);
@@ -41,8 +42,11 @@ try {
   assert.equal(check.font_text_operators, 0);
   assert.ok(check.vector_path_count > 0);
   assert.equal(check.repetition.geometry_source, 'emitted_pdf_vector_paths');
-  assert.equal(check.repetition.exact_count, 0);
-  assert.equal(check.repetition.near_count, 0);
+  assert.equal(check.repetition.mode, 'observed');
+  assert.equal(check.repetition.enforcement, 'report_source_reuse');
+  assert.ok(check.repetition.exact_count + check.repetition.near_count > 0);
+  assert.equal(check.repetition.status, 'review_needed');
+  assert.ok(report.source_reuse.reused_occurrences > 0);
   const diversity = JSON.parse(command(binary, ['profile', 'diversity', join(examples, 'synthetic-profile.json'), '--document', join(examples, 'math.json')]));
   assert.ok(diversity.groups.some(group => group.requested_occurrences > 1));
   const correctionsPdf = join(temporary, 'corrections.pdf');
@@ -52,7 +56,9 @@ try {
   assert.ok(corrections.visible_symbol_count > corrections.rendered_symbol_count);
   assert.equal(corrections.required_symbol_count, corrections.rendered_symbol_count);
   const correctionCheck = JSON.parse(command(binary, ['check', correctionsPdf, '--manifest', join(temporary, 'corrections.build.json')]));
-  assert.equal(correctionCheck.word_patterns.status, 'pass');
+  assert.equal(correctionCheck.word_patterns.mode, 'observed');
+  assert.equal(correctionCheck.word_patterns.enforcement, 'report_source_reuse');
+  assert.equal(correctionCheck.word_patterns.status, correctionCheck.word_patterns.repeated_word_count ? 'review_needed' : 'pass');
   assert.ok(correctionCheck.word_patterns.comparison_count > 0);
   assert.equal(correctionCheck.word_patterns.geometry_source, 'emitted_pdf_vector_paths');
   const installed = join(temporary, 'standalone skill');

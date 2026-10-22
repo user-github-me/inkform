@@ -9,7 +9,7 @@ from inkform.cli import main
 from inkform.errors import InkformError
 from inkform.geometry import geometry_hash
 from inkform.measurements import measure_style
-from inkform.profiles import load_profile, merge_profile, save_profile, validate_profile
+from inkform.profiles import accepted_glyphs, coverage, load_profile, merge_profile, renderable_glyphs, save_profile, validate_profile
 from inkform.synthesis import approve_variants, synthesize_variants, write_synthesis_review
 
 
@@ -71,6 +71,20 @@ def test_generated_review_does_not_inflate_measured_sample_statistics(proposal):
     assert after["accepted_glyph_records"] == before["accepted_glyph_records"] + len(decisions)
 
 
+def test_approved_invented_forms_are_stored_but_excluded_from_default_coverage(proposal):
+    profile, result, _ = proposal
+    decisions = [{"glyph_id": row["glyph_id"], "geometry_sha256": row["geometry_sha256"], "decision": "reviewed"}
+                 for row in result["proposals"]]
+    approved = approve_variants(result["profile"], decisions, "fixture-review")
+    assert len(accepted_glyphs(approved)) > len(accepted_glyphs(profile))
+    assert renderable_glyphs(approved) == accepted_glyphs(profile)
+    count = len(accepted_glyphs(profile))
+    assert coverage(approved, [('text', 'b')])['glyph_counts'][0]['available_variants'] == count
+    approved.setdefault('variation', {})['mode'] = 'experimental'
+    validate_profile(approved)
+    assert len(renderable_glyphs(approved)) == count + len(decisions)
+
+
 @pytest.mark.parametrize("review", [[], None, {}, {"decisions": []}, {"decisions": [None], "reviewed_by": "fixture-review"}])
 def test_malformed_review_is_diagnostic_and_does_not_save(proposal, tmp_path, capsys, review):
     profile, _, paths = proposal
@@ -90,3 +104,23 @@ def test_correction_preference_command_is_immutable_and_remembered(proposal, cap
     assert updated["output_preferences"] == {"corrections": "none", "selected_by": "writer"}
     assert updated["profile_version"] != profile["profile_version"]
     assert save_profile(profile).read_bytes() == original
+
+
+def test_source_fidelity_preference_preserves_corrections_and_reviewed_bank(proposal, capsys):
+    profile, _, _ = proposal
+    updated = merge_profile(profile, {'output_preferences': {'corrections': 'sampled', 'selected_by': 'writer'}})
+    original = save_profile(updated).read_bytes()
+    assert main(['profile', 'preferences', profile['profile_id'], '--variation-mode', 'observed']) == 0
+    capsys.readouterr()
+    current = load_profile(profile['profile_id'])
+    assert current['variation']['mode'] == 'observed'
+    assert current['output_preferences'] == updated['output_preferences']
+    assert current['glyphs'] == updated['glyphs']
+    assert save_profile(updated).read_bytes() == original
+
+
+def test_unknown_variation_policy_is_rejected(proposal):
+    profile, _, _ = proposal
+    profile.setdefault('variation', {})['mode'] = 'invent-anything'
+    with pytest.raises(InkformError):
+        validate_profile(profile)

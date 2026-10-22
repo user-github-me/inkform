@@ -18,7 +18,9 @@ from inkform.word_patterns import (audit_word_patterns, compare_words,
 
 @pytest.fixture
 def profile():
-    return load_profile(Path(__file__).resolve().parents[1]/"examples"/"synthetic-profile.json")
+    result = load_profile(Path(__file__).resolve().parents[1]/"examples"/"synthetic-profile.json")
+    result.setdefault("variation", {})["mode"] = "experimental"
+    return result
 
 
 def word(profile, text="exist", identity="first", page=0):

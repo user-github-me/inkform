@@ -10,7 +10,7 @@ import sys
 from . import __version__
 from .document import literal_document, load_document, visible_requirements
 from .errors import InkformError
-from .profiles import accepted_glyphs, coverage, default_data_dir, load_profile, merge_profile, next_profile_version, resolve_render_mode, save_profile
+from .profiles import accepted_glyphs, renderable_glyphs, coverage, default_data_dir, load_profile, merge_profile, next_profile_version, resolve_render_mode, save_profile
 
 
 def parser():
@@ -25,8 +25,10 @@ def parser():
     train.add_argument("--observations", type=Path, help="Portable labeled observation manifest from sample review")
     train.add_argument("--calibration-document", type=Path, help="Semantic document to use for the calibration PDF")
     train.add_argument("--document", type=Path, help="Check whether the learned profile is ready for this requested document")
-    train.add_argument("--mine", action="store_true", help="Search preserved pages for more forms and write a private review queue")
-    train.add_argument("--synthesize", action="store_true", help="Propose writer-conditioned variants for sparse forms; exact geometry still needs review")
+    mining = train.add_mutually_exclusive_group()
+    mining.add_argument("--mine", action="store_true", dest="mine", default=True, help="Search every preserved page for all candidate source forms (default)")
+    mining.add_argument("--no-mine", action="store_false", dest="mine", help="Skip the source collection scan for this training run")
+    train.add_argument("--synthesize", action="store_true", help="Experimental: propose invented forms for review; excluded from observed rendering")
     profile = sub.add_parser("profile", help="Create, inspect, update, and check private profiles")
     ps = profile.add_subparsers(dest="operation", required=True)
     create = ps.add_parser("create")
@@ -55,13 +57,14 @@ def parser():
     mine.add_argument("--characters", help="Characters to collect; default: every reviewed template")
     mine.add_argument("--role", help="Restrict candidates to an existing semantic role")
     mine.add_argument("--per-label", type=int, default=24)
+    mine.add_argument("--all-candidates", action="store_true", help="Collect all qualifying unique source candidates without a per-character quota")
     mine.add_argument("--min-score", type=float, default=.58)
     mine.add_argument("--output", required=True, type=Path, help="Private review directory for crops and proposed observations")
     diversity = ps.add_parser("diversity", help="Count distinct reviewed shapes and identify where more samples would help")
     diversity.add_argument("profile")
     diversity.add_argument("--document", type=Path)
     diversity.add_argument("--mode", choices=["fresh_strokes", "clean_outline"])
-    synth = ps.add_parser("synthesize", help="Generate private, reviewable letter variants conditioned on the writer's own forms")
+    synth = ps.add_parser("synthesize", help="Experimental invented variants; excluded from normal observed rendering")
     synth.add_argument("profile")
     synth.add_argument("--characters")
     synth.add_argument("--role")
@@ -71,9 +74,10 @@ def parser():
     review = ps.add_parser("review-variants", help="Apply exact-geometry review decisions and save a new private profile version")
     review.add_argument("profile", help="Generated proposal-profile.json")
     review.add_argument("--review", required=True, type=Path)
-    prefs = ps.add_parser("preferences", help="Remember whether to reproduce observed correction habits")
+    prefs = ps.add_parser("preferences", help="Remember source fidelity and observed correction preferences")
     prefs.add_argument("profile")
-    prefs.add_argument("--corrections", required=True, choices=["sampled", "none"])
+    prefs.add_argument("--corrections", choices=["sampled", "none"])
+    prefs.add_argument("--variation-mode", choices=["observed", "experimental"])
     prefs.add_argument("--selected-by", default="cli-user")
     ps.add_parser("list")
     text = sub.add_parser("document", help="Convert a UTF-8 text file to literal document IR")
@@ -116,6 +120,8 @@ def _summary(profile, path=None):
     return {"profile_id": profile["profile_id"], "profile_version": profile["profile_version"],
             "path": str(path) if path else None, "synthetic": profile["synthetic"],
             "glyph_count": len(profile["glyphs"]), "reviewed_glyph_count": len(glyphs),
+            "renderable_glyph_count": len(renderable_glyphs(profile)),
+            "variation_mode": profile.get("variation", {}).get("mode", "observed"),
             "default_render_mode": resolve_render_mode(profile),
             "coverage": {role: sorted(chars) for role, chars in by_role.items()},
             "calibration_status": profile["calibration_status"], "import_report": profile.get("import_report")}
@@ -168,13 +174,18 @@ def run(args):
             updated = merge_profile(current, {"glyphs": [g for g in reviewed["glyphs"] if g["glyph_id"] in decisions]})
             return _summary(updated, save_profile(updated))
         if op == "preferences":
-            profile["output_preferences"] = {"corrections": args.corrections, "selected_by": args.selected_by}
+            if args.corrections is None and args.variation_mode is None:
+                raise InkformError("missing_preference", "Choose --corrections or --variation-mode.")
+            if args.corrections is not None:
+                profile.setdefault("output_preferences", {}).update(corrections=args.corrections, selected_by=args.selected_by)
+            if args.variation_mode is not None:
+                profile.setdefault("variation", {})["mode"] = args.variation_mode
             profile["profile_version"] = next_profile_version(profile)
             return _summary(profile, save_profile(profile))
         if op == "mine":
             from .mining import mine_candidates
             return mine_candidates(profile, args.samples, args.output, characters=args.characters,
-                                   role=args.role, per_label=args.per_label, min_score=args.min_score)
+                                   role=args.role, per_label=None if args.all_candidates else args.per_label, min_score=args.min_score)
         if op == "diversity":
             from .diversity import profile_diversity
             return profile_diversity(profile, load_document(args.document) if args.document else None, args.mode)

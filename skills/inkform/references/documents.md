@@ -77,7 +77,7 @@ Supported expression fields:
 | `superscript`, `subscript` | `base`, `script` |
 | `limit` | `variable`, `approaches`, `direction` (`left`, `right`, `both`), `body` |
 
-Single-letter function names use math-variable forms; multi-letter names use math-function forms. Fraction/roof bars use a reviewed Unicode minus `−` centerline, expanded horizontally without increasing pen width. Roots additionally require `√`; limits require `lim`, `→`, and the direction's sign. Individual arrows can vary, while fraction and root bars still span their content. Unsupported constructs fail before export.
+Single-letter function names use math-variable forms; multi-letter names use math-function forms. Fraction/roof bars use a reviewed Unicode minus `−` centerline, expanded horizontally without increasing pen width. Roots additionally require `√`; limits require `lim`, `→`, and the direction's sign. Individual arrows select from real reviewed source occurrences, while fraction and root bars still span their content. Unsupported constructs fail before export.
 
 Read the project's `examples/math.json` for nested examples. For an absent graph add `{"source_item":"q5","reason":"required_graph_missing"}` to `unresolved_inputs`. Complete independent content and identify the deliverable as partial. Solve and check source answers outside the renderer; optional `verification` metadata records what was actually checked. Rendering success proves no mathematical answer.
 
@@ -111,11 +111,15 @@ Use `coordinate_kind: qualitative` when the source establishes only a shape,
 not numerical values. Keep those placement coordinates out of asserted answers.
 Labels use the writer's text forms; axes use their reviewed right-arrow forms
 rotated to the declared direction. Their heads retain normal writing scale.
-The profile's source-reviewed `graph_style` can control static pen width and
-axis bow; absent evidence is reported as an estimate. Modest curve deviations
-preserve supplied anchors, plateaus, and monotonic spans. The actual PDF check
-verifies anchors, marker fill, and every visible graph path. Repeated geometric
-data are legitimate; graph labels and arrows still undergo handwriting audits.
+The profile's source-reviewed `graph_style` supplies static pen width. In
+observed mode, axes and curves follow the explicit graph specification without
+added bow, wobble, or marker deformation. A traced curve needs enough supplied
+points to preserve its visible shape. Experimental mode can use reviewed axis
+bow extents and estimated curve deviations; those are not source-recovered pen
+motion. The actual PDF check verifies anchors, marker fill, and every visible
+graph path. Repeated geometric data are legitimate; graph labels and arrows
+still undergo handwriting audits. Report source limitations instead of adding
+generic irregularity to make the graph look handwritten.
 
 Do not infer an equation, redraw a missing problem graph, change an open point
 to a filled point, or shift data to make the picture appear more handwritten.

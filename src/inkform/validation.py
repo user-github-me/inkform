@@ -515,6 +515,8 @@ def _check_repetition(manifest, instances, report, *, geometry_source="manifest_
         policy = {key: settings[key] for key in ("threshold_mm", "adjacent_pages", "strict_near") if key in settings}
         if isinstance(variation, dict) and "amount" in variation:
             policy["amount"] = variation["amount"]
+        if isinstance(variation, dict) and "mode" in variation:
+            policy["mode"] = variation["mode"]
         diagnostic = audit_repetition(instances, policy=policy)
     except (TypeError, ValueError, OverflowError) as exc:
         report["checks"]["repetition"] = "fail"
@@ -528,6 +530,10 @@ def _check_repetition(manifest, instances, report, *, geometry_source="manifest_
         _issue(report, "repeated_ink_geometry", "Repeated ink exceeds the declared physical-shape threshold on the same or adjacent page.",
                exact_pairs=diagnostic["exact_count"], near_pairs=diagnostic["near_count"],
                threshold_mm=diagnostic["threshold_mm"])
+    elif diagnostic["status"] == "review_needed" and diagnostic["mode"] == "observed" and (diagnostic["exact_count"] or diagnostic["near_count"]):
+        _warning(report, "observed_source_reuse", "Reviewed source forms are reused. Their original curves were preserved; collect more real examples to increase variety.",
+                 exact_pairs=diagnostic["exact_count"], near_pairs=diagnostic["near_count"],
+                 threshold_mm=diagnostic["threshold_mm"])
     elif diagnostic["status"] in {"not_checked", "partial"}:
         _warning(report, "incomplete_repetition_audit", "This manifest does not provide auditable paths and semantic roles for every ink instance.",
                  checked=diagnostic["checked_instance_count"], unchecked=len(diagnostic["unchecked_instances"]))
@@ -536,7 +542,7 @@ def _check_repetition(manifest, instances, report, *, geometry_source="manifest_
                  pairs=diagnostic["limited_count"])
     try:
         word_diagnostic = audit_word_patterns(instances, amount=variation.get("amount") if isinstance(variation, dict) else None,
-                                              adjacent_pages=policy.get("adjacent_pages", 1))
+                                              adjacent_pages=policy.get("adjacent_pages", 1), mode=policy.get("mode", "experimental"))
         word_diagnostic["geometry_source"] = geometry_source
         word_diagnostic["pdf_hash_binding"] = report["checks"].get("manifest_pdf_hash", "not_checked")
         report["word_patterns"] = word_diagnostic
@@ -544,6 +550,9 @@ def _check_repetition(manifest, instances, report, *, geometry_source="manifest_
         if word_diagnostic["status"] == "fail":
             _issue(report, "repeated_word_patterns", "Repeated words reuse too many structurally similar letter forms after removing scale and slant.",
                    repeated_pairs=word_diagnostic["repeated_word_count"], threshold_mm=word_diagnostic["threshold_mm"])
+        elif word_diagnostic["status"] == "review_needed":
+            _warning(report, "observed_word_reuse", "Some words reuse similar source letter sequences. This is reported without inventing extra curves or new letter constructions.",
+                     repeated_pairs=word_diagnostic["repeated_word_count"], threshold_mm=word_diagnostic["threshold_mm"])
         elif word_diagnostic["status"] in {"partial", "not_checked"}:
             _warning(report, "incomplete_word_pattern_audit", "Lexical boundaries are missing; repeated word constructions were not fully audited.",
                      ungrouped=len(word_diagnostic["ungrouped_tokens"]))
@@ -671,7 +680,7 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
     an exact primitive inventory, data mapping, anchors and marker semantics
     must agree. The emitted pass checks actual PDF path coordinates as well.
     """
-    from .graphs import graph_axis_anchors, graph_requirements, validate_graph
+    from .graphs import _curve_stroke, graph_axis_anchors, graph_requirements, validate_graph
     records = manifest.get("graphs", [])
     primitives = [item for item in instances if is_graph_primitive(item)]
     attributed = [item for item in instances if "graph_id" in item or item.get("content_kind") == "graph_primitive"]
@@ -731,6 +740,7 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                 return [padding+(point[0]-xmin)/(xmax-xmin)*(spec["width_mm"]-2*padding),
                         spec["height_mm"]-padding-(point[1]-ymin)/(ymax-ymin)*(spec["height_mm"]-2*padding)]
             offset = None
+            observed_only = manifest.get("variation", {}).get("mode") == "observed"
             pages = {by_token[token].get("page") for token in primitive_ids+label_ids+arrow_ids}
             if len(pages) != 1:
                 raise ValueError("one graph must occupy one page")
@@ -753,6 +763,14 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                 path = paths[0]
                 if kind in {"axis", "curve"}:
                     actual = [path["start"]]+[segment["end"] for segment in path["segments"]]
+                    if observed_only:
+                        interpolation = element.get("interpolation", "linear") if kind == "curve" else "linear"
+                        canonical = _curve_stroke(expected_anchors, interpolation, lambda _: 0, 0)
+                        if len(path["segments"]) != len(canonical["segments"]) or any(
+                            segment["type"] != "cubic" or any(math.dist(segment[key], target[key]) > .002
+                            for key in ("control1", "control2", "end"))
+                            for segment, target in zip(path["segments"], canonical["segments"])):
+                            raise ValueError("observed-mode graph paths must retain explicit interpolation without invented bends")
                 elif kind == "tick":
                     if len(path["segments"]) != 1:
                         raise ValueError("graph tick must have one span")
@@ -769,7 +787,7 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                     amount = manifest.get("variation", {}).get("amount", .1)
                     if not isinstance(amount, (int, float)) or isinstance(amount, bool) or not math.isfinite(amount) or not 0 <= amount <= .3:
                         raise ValueError("graph marker needs a valid bounded variation amount")
-                    spread, radius = .025*min(amount/.1, 3), element.get("radius_mm", .8)
+                    spread, radius = (0 if observed_only else .025*min(amount/.1, 3)), element.get("radius_mm", .8)
                     if not all(radius*(1-spread)-.002 <= value <= radius*(1+spread)+.002 for value in (rx, ry)):
                         raise ValueError("graph marker radii exceed their declared bounded size")
                     k = .5522847498307936

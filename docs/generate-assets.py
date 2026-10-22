@@ -14,7 +14,6 @@ from inkform.layout import plan_document, Box, join, map_strokes
 from inkform.profiles import load_profile
 from inkform.rendering import export_pdf
 from inkform.validation import check_pdf
-from inkform.repetition import audit_repetition
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,7 +53,7 @@ def authored_specimen():
 
     Each row picks another authored source construction. This is a reference
     sheet, while the paired output below goes through the actual renderer and
-    both independent repetition checks.
+    independent repetition checks, reporting honest reuse of the finite bank.
     """
     instances = []
     for row in range(3):
@@ -98,9 +97,8 @@ reference_plan = authored_specimen()
 comparison = literal_document("letter river minimum\nletter river minimum\nletter river minimum", "inkform-public-comparison")
 comparison["page"] = {"width_mm": 180, "height_mm": 105, "margins_mm": 10, "body_x_height_mm": 5.5}
 comparison_plan = plan_document(comparison, profile, seed=72, mode="fresh_strokes")
-assert comparison_plan["word_patterns"]["status"] == "pass"
-assert audit_repetition(comparison_plan["instances"])["near_count"] == 0
-(ASSETS / "comparison-output.svg").write_text(svg(comparison_plan, "Generated synthetic words with checked alternate constructions", "#19313a"))
+assert comparison_plan["variation"]["mode"] == "observed"
+(ASSETS / "comparison-output.svg").write_text(svg(comparison_plan, "Generated synthetic words preserving authored reference shapes", "#19313a"))
 
 plan = plan_document(demo, profile, seed=72, mode="fresh_strokes")
 assert note_plan["page_count"] == math_plan["page_count"] == plan["page_count"] == 1
@@ -109,4 +107,4 @@ preview_dir = ROOT / "build" / "public-demo-preview"
 report = check_pdf(ASSETS / "inkform-synthetic-demo.pdf", plan, preview_dir, preview_dpi=150)
 assert report["ok"], report
 (preview_dir / "report.json").write_text(json.dumps(report, indent=2) + "\n")
-(ASSETS / "demo-provenance.json").write_text(json.dumps({"source": "examples/synthetic-varied-profile.json", "document": "examples/corrections.json", "synthetic": True, "personal_sources": 0, "seed": 72, "representation": "centerline", "pen_width_mm": .38, "width_profile": "constant", "variation": {"amount": .1, "basis": "authored alternate constructions plus bounded occurrence estimates"}, "word_pattern_audit": {"status": plan["word_patterns"]["status"], "compared_words": plan["word_patterns"]["comparison_count"], "repeated_word_count": plan["word_patterns"]["repeated_word_count"]}, "comparison": {"source": "direct layout of authored public reference constructions", "output": "actual renderer; no private profile or input", "word_pattern_status": comparison_plan["word_patterns"]["status"], "repeated_word_comparisons": comparison_plan["word_patterns"]["comparison_count"], "repeated_word_count": comparison_plan["word_patterns"]["repeated_word_count"], "geometry_hash": comparison_plan["geometry_hash"]}, "corrections": "explicit authored examples; no fabricated sample habit", "geometry_hash": plan["geometry_hash"], "artifacts": ["handwriting.svg", "mathematics.svg", "inkform-synthetic-demo.pdf", "comparison-source.svg", "comparison-output.svg"]}, indent=2) + "\n")
+(ASSETS / "demo-provenance.json").write_text(json.dumps({"source": "examples/synthetic-varied-profile.json", "document": "examples/corrections.json", "synthetic": True, "personal_sources": 0, "seed": 72, "representation": "centerline", "pen_width_mm": .38, "width_profile": "constant", "variation": {"mode": "observed", "basis": "unchanged authored reference forms; real bank reuse reported"}, "word_pattern_audit": {"status": plan["word_patterns"]["status"], "compared_words": plan["word_patterns"]["comparison_count"], "repeated_word_count": plan["word_patterns"]["repeated_word_count"]}, "comparison": {"source": "direct layout of authored public reference constructions", "output": "actual renderer; no private profile or input", "word_pattern_status": comparison_plan["word_patterns"]["status"], "repeated_word_comparisons": comparison_plan["word_patterns"]["comparison_count"], "repeated_word_count": comparison_plan["word_patterns"]["repeated_word_count"], "geometry_hash": comparison_plan["geometry_hash"]}, "corrections": "explicit authored examples; no fabricated sample habit", "geometry_hash": plan["geometry_hash"], "artifacts": ["handwriting.svg", "mathematics.svg", "inkform-synthetic-demo.pdf", "comparison-source.svg", "comparison-output.svg"]}, indent=2) + "\n")

@@ -21,7 +21,8 @@ from pypdf import PdfReader, PdfWriter, Transformation
 from pypdf.generic import ContentStream, DictionaryObject, NameObject
 
 from .errors import InkformError
-from .repetition import audit_repetition, item_distance, shape_descriptor
+from .repetition import audit_repetition, is_graph_primitive, item_distance, shape_descriptor
+from .word_patterns import audit_word_patterns
 
 
 PT_TO_MM = 25.4 / 72
@@ -365,7 +366,7 @@ def _emitted_glyphs(reader, manifest):
         unit = float(page.get("/UserUnit", 1))
         state = {"matrix": (1, 0, 0, 1, 0, 0), "width": 1., "stroke_white": False, "fill_white": False, "cap": 0, "join": 0, "dash": []}
         states, marks, paths, groups = [], [], [], []
-        group = None
+        group, group_knockout = None, False
 
         def point(values):
             x, y = _transform(tuple(map(float, values)), state["matrix"])
@@ -380,15 +381,15 @@ def _emitted_glyphs(reader, manifest):
                 if name == "/InkformGlyph":
                     if group is not None:
                         raise ValueError("Nested Inkform glyph markers")
-                    group, paths = [], []
+                    group, paths, group_knockout = [], [], False
             elif op == b"EMC":
                 if not marks:
                     raise ValueError("Unbalanced PDF marked content")
                 if marks.pop() == "/InkformGlyph":
                     if group is None or not group:
                         raise ValueError("A marked glyph has no visible vector ink")
-                    groups.append(group)
-                    group, paths = None, []
+                    groups.append((group, group_knockout))
+                    group, paths, group_knockout = None, [], False
             elif op == b"q":
                 states.append(state.copy())
             elif op == b"Q":
@@ -438,8 +439,27 @@ def _emitted_glyphs(reader, manifest):
                 elif op in _PAINT_OPERATORS | {b"n"}:
                     if op in {b"s", b"b", b"b*"} and paths:
                         paths[-1]["closed"] = True
-                    fill = op in {b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"} and not state["fill_white"]
-                    stroke = op in {b"S", b"s", b"B", b"B*", b"b", b"b*"} and not state["stroke_white"]
+                    fills = op in {b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"}
+                    strokes = op in {b"S", b"s", b"B", b"B*", b"b", b"b*"}
+                    if paths and group_knockout and (fills or strokes):
+                        raise ValueError("No additional paint is allowed after an open marker knockout")
+                    if paths and strokes and state["stroke_white"]:
+                        raise ValueError("White strokes cannot hide ink in a marked glyph")
+                    if paths and fills and state["fill_white"]:
+                        expected_item = page_expected[len(groups)] if len(groups) < len(page_expected) else {}
+                        allowed = (expected_item.get("paper_knockout") == "open_graph_marker"
+                                   and expected_item.get("role") == "graph.marker"
+                                   and expected_item.get("graph_kind") == "marker"
+                                   and is_graph_primitive(expected_item)
+                                   and op == b"B*" and not group and not state["stroke_white"]
+                                   and len(paths) == 1 and paths[0].get("closed")
+                                   and len(paths[0]["segments"]) == 4
+                                   and all(segment["type"] == "cubic" for segment in paths[0]["segments"]))
+                        if not allowed:
+                            raise ValueError("White fill is only allowed as the single simultaneous fill/stroke of an explicit open graph marker")
+                        group_knockout = True
+                    fill = fills and not state["fill_white"]
+                    stroke = strokes and not state["stroke_white"]
                     if paths and fill:
                         if op not in {b"f*", b"B*", b"b*"}:
                             raise ValueError("Marked glyphs require auditable even-odd fills")
@@ -467,9 +487,12 @@ def _emitted_glyphs(reader, manifest):
             marked_pages += 1
             if len(groups) != len(page_expected):
                 raise ValueError("Emitted glyph group count differs from manifest instances")
-            for expected_item, paints in zip(page_expected, groups):
+            for expected_item, (paints, knockout) in zip(page_expected, groups):
                 result.append({"token_id": expected_item.get("token_id"), "role": expected_item.get("role"),
                                "text": expected_item.get("text"), "page": page_index, "_ink_paints": paints,
+                               **({"paper_knockout": "open_graph_marker"} if knockout else {}),
+                               **{key: expected_item[key] for key in ("word_id", "word_position", "semantic", "content_kind",
+                                   "graph_id", "graph_kind", "graph_element_id", "graph_data_anchors", "graph_plot_anchors_mm") if key in expected_item},
                                **({"nominal_size_mm": expected_item["nominal_size_mm"]} if "nominal_size_mm" in expected_item else {})})
     if not marked_pages:
         if contract is not None:
@@ -511,6 +534,22 @@ def _check_repetition(manifest, instances, report, *, geometry_source="manifest_
     if diagnostic["limited_count"]:
         _warning(report, "limited_shape_space", "Simple punctuation or bars remain close in shape; the audit does not force them into different symbols.",
                  pairs=diagnostic["limited_count"])
+    try:
+        word_diagnostic = audit_word_patterns(instances, amount=variation.get("amount") if isinstance(variation, dict) else None,
+                                              adjacent_pages=policy.get("adjacent_pages", 1))
+        word_diagnostic["geometry_source"] = geometry_source
+        word_diagnostic["pdf_hash_binding"] = report["checks"].get("manifest_pdf_hash", "not_checked")
+        report["word_patterns"] = word_diagnostic
+        report["checks"]["word_patterns"] = word_diagnostic["status"]
+        if word_diagnostic["status"] == "fail":
+            _issue(report, "repeated_word_patterns", "Repeated words reuse too many structurally similar letter forms after removing scale and slant.",
+                   repeated_pairs=word_diagnostic["repeated_word_count"], threshold_mm=word_diagnostic["threshold_mm"])
+        elif word_diagnostic["status"] in {"partial", "not_checked"}:
+            _warning(report, "incomplete_word_pattern_audit", "Lexical boundaries are missing; repeated word constructions were not fully audited.",
+                     ungrouped=len(word_diagnostic["ungrouped_tokens"]))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        report["checks"]["word_patterns"] = "fail"
+        _issue(report, "invalid_word_pattern_audit", "Could not audit repeated word constructions.", reason=str(exc))
 
 
 def _check_content_accounting(manifest: dict, instances: list, report: dict) -> None:
@@ -554,6 +593,7 @@ def _check_content_accounting(manifest: dict, instances: list, report: dict) -> 
     except (KeyError, TypeError, ValueError) as exc:
         _issue(report, "invalid_content_inventory", "Could not verify role-aware content accounting.", reason=str(exc))
     _check_correction_accounting(manifest, instances, report)
+    _check_graph_accounting(manifest, instances, report)
     geometry_hash = manifest.get("geometry_hash")
     if geometry_hash is not None:
         try:
@@ -564,14 +604,14 @@ def _check_content_accounting(manifest: dict, instances: list, report: dict) -> 
             _issue(report, "invalid_instance_hash_input", "Instance geometry is not finite JSON data.")
     report["checks"]["content_accounted_for"] = ("fail" if len(report["errors"]) != start_errors else
         "pass_with_declared_missing_input" if manifest.get("unresolved_inputs") else "pass")
-    report["content_accounting_scope"] = "Semantic symbol inventory, declared deleted text and correction marks, unique token IDs, counts, and instance hash when supplied; source transcription and mathematical truth are not inferred."
+    report["content_accounting_scope"] = "Semantic symbols, declared corrections, explicit graph data/anchors, unique token IDs, counts, and instance hash when supplied; source transcription and mathematical truth are not inferred."
 
 
 def _check_correction_accounting(manifest: dict, instances: list, report: dict) -> None:
     """Every extra ink token must belong to a declared, internally exact edit."""
     from .document import clusters
 
-    auxiliary = [item for item in instances if item.get("semantic", True) is False]
+    auxiliary = [item for item in instances if item.get("semantic", True) is False and not is_graph_primitive(item)]
     records = manifest.get("corrections", [])
     if not auxiliary and not records:
         return
@@ -621,6 +661,166 @@ def _check_correction_accounting(manifest: dict, instances: list, report: dict) 
             raise ValueError("undeclared correction references")
     except (KeyError, TypeError, ValueError) as exc:
         _issue(report, "invalid_correction_inventory", "Could not account for correction ink.", reason=str(exc))
+
+
+def _check_graph_accounting(manifest, instances, report, *, emitted=False):
+    """Bind every graph primitive and data anchor to an explicit graph spec.
+
+    Graph axes/curves may share geometry because their coordinates carry data.
+    That exception is never granted merely by relabeling a handwriting token:
+    an exact primitive inventory, data mapping, anchors and marker semantics
+    must agree. The emitted pass checks actual PDF path coordinates as well.
+    """
+    from .graphs import graph_axis_anchors, graph_requirements, validate_graph
+    records = manifest.get("graphs", [])
+    primitives = [item for item in instances if is_graph_primitive(item)]
+    attributed = [item for item in instances if "graph_id" in item or item.get("content_kind") == "graph_primitive"]
+    if not records and not attributed:
+        return
+    check = "emitted_graph_geometry" if emitted else "graph_data_accounted_for"
+    report["checks"][check] = "fail"
+    try:
+        if not isinstance(records, list) or not records:
+            raise ValueError("graph ink needs explicit graph ledger records")
+        if manifest.get("visible_symbol_count") != len(instances):
+            raise ValueError("visible_symbol_count must include graph primitives, labels, and arrows")
+        by_token = {item["token_id"]: item for item in instances}
+        if len(by_token) != len(instances):
+            raise ValueError("graph inventory needs unique token identities")
+        paint_order = {item["token_id"]: index for index, item in enumerate(instances)}
+        used, graph_ids, declared_primitives = set(), set(), set()
+        for record in records:
+            identity, spec = record["graph_id"], record["spec"]
+            if not isinstance(identity, str) or not identity or identity in graph_ids:
+                raise ValueError("graph IDs must be nonempty and unique")
+            graph_ids.add(identity)
+            validate_graph(spec)
+            primitive_ids, label_ids, arrow_ids = (record[key] for key in ("primitive_token_ids", "label_token_ids", "arrow_token_ids"))
+            for tokens in (primitive_ids, label_ids, arrow_ids):
+                if not isinstance(tokens, list) or any(not isinstance(token, str) for token in tokens):
+                    raise ValueError("graph token inventories must be string arrays")
+                if len(tokens) != len(set(tokens)) or used.intersection(tokens):
+                    raise ValueError("graph inventories must be disjoint")
+                used.update(tokens)
+                if any(by_token[token].get("graph_id") != identity for token in tokens):
+                    raise ValueError("graph token points to another graph")
+            declared_primitives.update(primitive_ids)
+            if any(not is_graph_primitive(by_token[token]) for token in primitive_ids):
+                raise ValueError("primitive inventory contains ordinary or semantic ink")
+            if any(by_token[token].get("semantic", True) is False or by_token[token].get("role") != "text" or by_token[token].get("graph_kind") != "label" for token in label_ids):
+                raise ValueError("graph labels must be semantic writer text")
+            if any(by_token[token].get("semantic", True) is False or by_token[token].get("role") != "math.operator" or by_token[token].get("text") != "→" or by_token[token].get("graph_kind") != "arrow" for token in arrow_ids):
+                raise ValueError("graph arrows must be semantic sampled writer arrows")
+            actual_symbols = Counter((by_token[token]["role"], by_token[token]["text"]) for token in label_ids+arrow_ids)
+            if actual_symbols != Counter(graph_requirements(spec)):
+                raise ValueError("graph labels or sampled arrows differ from their explicit specification")
+            expected = {}
+            for axis in spec.get("axes", []):
+                expected[f"{identity}.axis.{axis['id']}"] = ("axis", graph_axis_anchors(axis), axis)
+                for tick in axis.get("ticks", []):
+                    expected[f"{identity}.tick.{tick['id']}"] = ("tick", [tick["at"]], tick)
+            for curve in spec.get("curves", []):
+                expected[f"{identity}.curve.{curve['id']}"] = ("curve", curve["points"], curve)
+            for marker in spec.get("markers", []):
+                expected[f"{identity}.marker.{marker['id']}"] = ("marker", [marker["at"]], marker)
+            if set(primitive_ids) != set(expected):
+                raise ValueError("graph primitive inventory differs from explicit elements")
+            padding = spec.get("padding_mm", 12)
+            xmin, xmax = spec["x_range"]; ymin, ymax = spec["y_range"]
+            def mapped(point):
+                return [padding+(point[0]-xmin)/(xmax-xmin)*(spec["width_mm"]-2*padding),
+                        spec["height_mm"]-padding-(point[1]-ymin)/(ymax-ymin)*(spec["height_mm"]-2*padding)]
+            offset = None
+            pages = {by_token[token].get("page") for token in primitive_ids+label_ids+arrow_ids}
+            if len(pages) != 1:
+                raise ValueError("one graph must occupy one page")
+            for token, (kind, data_anchors, element) in expected.items():
+                item = by_token[token]
+                if item.get("graph_kind") != kind or item.get("role") != "graph."+kind or item.get("graph_data_anchors") != data_anchors:
+                    raise ValueError("graph kind or recorded data anchors differ from its specification")
+                anchors = item["graph_plot_anchors_mm"]
+                if len(anchors) != len(data_anchors) or any(len(point) != 2 or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in point) for point in anchors):
+                    raise ValueError("graph plot anchors must be finite coordinates")
+                if offset is None:
+                    offset = [anchors[0][axis]-mapped(data_anchors[0])[axis] for axis in (0, 1)]
+                expected_anchors = [[value+offset[axis] for axis, value in enumerate(mapped(point))] for point in data_anchors]
+                if any(math.dist(actual, expected_point) > .002 for actual, expected_point in zip(anchors, expected_anchors)):
+                    raise ValueError("graph coordinate mapping differs between data elements")
+                paints = item.get("_ink_paints")
+                paths = [path for paint in paints for path in paint["strokes"]] if paints else item["strokes"]
+                if len(paths) != 1:
+                    raise ValueError("each graph primitive must have one explicit path")
+                path = paths[0]
+                if kind in {"axis", "curve"}:
+                    actual = [path["start"]]+[segment["end"] for segment in path["segments"]]
+                elif kind == "tick":
+                    if len(path["segments"]) != 1:
+                        raise ValueError("graph tick must have one span")
+                    actual = [[(a+b)/2 for a,b in zip(path["start"], path["segments"][0]["end"])]]
+                else:
+                    if not path.get("closed") or len(path["segments"]) != 4:
+                        raise ValueError("graph marker must be a closed four-span outline")
+                    actual = [[(a+b)/2 for a,b in zip(path["start"], path["segments"][1]["end"])]]
+                    representation = paints[0]["representation"] if paints else item["representation"]
+                    if (representation == "clean_outline") != (element["style"] == "filled"):
+                        raise ValueError("open and filled graph marker semantics changed")
+                    cx, cy = expected_anchors[0]
+                    rx, ry = path["start"][0]-cx, path["segments"][0]["end"][1]-cy
+                    amount = manifest.get("variation", {}).get("amount", .1)
+                    if not isinstance(amount, (int, float)) or isinstance(amount, bool) or not math.isfinite(amount) or not 0 <= amount <= .3:
+                        raise ValueError("graph marker needs a valid bounded variation amount")
+                    spread, radius = .025*min(amount/.1, 3), element.get("radius_mm", .8)
+                    if not all(radius*(1-spread)-.002 <= value <= radius*(1+spread)+.002 for value in (rx, ry)):
+                        raise ValueError("graph marker radii exceed their declared bounded size")
+                    k = .5522847498307936
+                    canonical = [([cx+rx, cy+k*ry], [cx+k*rx, cy+ry], [cx, cy+ry]),
+                                 ([cx-k*rx, cy+ry], [cx-rx, cy+k*ry], [cx-rx, cy]),
+                                 ([cx-rx, cy-k*ry], [cx-k*rx, cy-ry], [cx, cy-ry]),
+                                 ([cx+k*rx, cy-ry], [cx+rx, cy-k*ry], [cx+rx, cy])]
+                    if any(segment["type"] != "cubic" or any(math.dist(segment[key], value) > .002 for key, value in zip(("control1", "control2", "end"), controls))
+                           for segment, controls in zip(path["segments"], canonical)):
+                        raise ValueError("graph marker must keep its declared bounded ellipse rather than masking arbitrary ink")
+                    open_marker = element["style"] == "open"
+                    if (item.get("paper_knockout") == "open_graph_marker") != open_marker:
+                        raise ValueError("an open graph marker needs its actual white paper fill before the ink outline")
+                    if open_marker:
+                        pen_width = paints[0]["pen_width_mm"] if paints else item["pen_width_mm"]
+                        if min(rx, ry)-pen_width/2 < .15-.002:
+                            raise ValueError("an open graph marker has no reliably visible paper interior")
+                        underlying = [entry for entry in primitive_ids if by_token[entry].get("graph_kind") in {"axis", "curve", "tick"}]+arrow_ids
+                        if any(paint_order[entry] >= paint_order[token] for entry in underlying):
+                            raise ValueError("data strokes and arrows must be painted before open graph markers")
+                if len(actual) != len(expected_anchors) or any(math.dist(a,b) > .002 for a,b in zip(actual, expected_anchors)):
+                    raise ValueError("drawn graph endpoints/centres moved away from explicit data anchors")
+        if declared_primitives != {item["token_id"] for item in primitives}:
+            raise ValueError("undeclared graph primitive ink")
+        if used != {item["token_id"] for item in attributed}:
+            raise ValueError("undeclared graph labels, arrows, or references")
+        report["checks"][check] = "pass"
+    except (InkformError, KeyError, TypeError, ValueError, OverflowError) as exc:
+        _issue(report, "invalid_graph_inventory", "Could not verify explicit graph data and drawn anchors.", reason=str(exc), geometry_source="emitted_pdf_vector_paths" if emitted else "manifest_vector_paths")
+
+
+def _graph_geometry_distance(emitted, expected):
+    """Compare large plot paths directly instead of allocating a glyph raster."""
+    paints = emitted.get("_ink_paints", [])
+    if len(paints) != 1 or paints[0]["representation"] != expected["representation"]:
+        return float("inf")
+    paths, originals = paints[0]["strokes"], expected["strokes"]
+    if len(paths) != len(originals):
+        return float("inf")
+    distance = abs(paints[0].get("pen_width_mm", .25)-expected["pen_width_mm"]) if expected["representation"] != "clean_outline" else 0
+    for path, original in zip(paths, originals):
+        if bool(path.get("closed")) != bool(original.get("closed")) or len(path["segments"]) != len(original["segments"]):
+            return float("inf")
+        distance = max(distance, math.dist(path["start"], original["start"]))
+        for segment, source in zip(path["segments"], original["segments"]):
+            if segment["type"] != source["type"]:
+                return float("inf")
+            for key in ("end", "control1", "control2"):
+                if key in source:
+                    distance = max(distance, math.dist(segment[key], source[key]))
+    return distance
 
 
 def _render_pages(pdf_path: Path, preview_dir: Path | None, report: dict, margins: dict | None,
@@ -779,6 +979,7 @@ def check_pdf(pdf_path: Path, manifest: dict | None = None, preview_dir: Path | 
             emitted = _emitted_glyphs(reader, manifest)
             if emitted is not None:
                 _check_repetition(manifest, emitted, report, geometry_source="emitted_pdf_vector_paths")
+                _check_graph_accounting(manifest, emitted, report, emitted=True)
                 # The ordinal mapping must also describe the ink that was
                 # actually emitted. Detect a changed PDF even if someone has
                 # recomputed its file hash while retaining an old sidecar.
@@ -788,9 +989,9 @@ def check_pdf(pdf_path: Path, manifest: dict | None = None, preview_dir: Path | 
                     expected_item = by_token.get(item.get("token_id"))
                     if expected_item is None:
                         raise ValueError("Emitted glyph has no manifest token")
-                    distance = item_distance(shape_descriptor(item), shape_descriptor(expected_item))
+                    distance = _graph_geometry_distance(item, expected_item) if is_graph_primitive(item) else item_distance(shape_descriptor(item), shape_descriptor(expected_item))
                     if distance > .025:
-                        mismatches.append({"token_id": item.get("token_id"), "page": item["page"], "distance_mm": round(distance, 7)})
+                        mismatches.append({"token_id": item.get("token_id"), "page": item["page"], "distance_mm": round(distance, 7) if math.isfinite(distance) else None})
                 report["checks"]["emitted_glyph_geometry"] = "fail" if mismatches else "pass"
                 if mismatches:
                     _issue(report, "emitted_glyph_mismatch", "PDF glyph ink differs from its manifest geometry.", instances=mismatches[:100], count=len(mismatches))

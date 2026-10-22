@@ -10,7 +10,7 @@ import sys
 from . import __version__
 from .document import literal_document, load_document, visible_requirements
 from .errors import InkformError
-from .profiles import accepted_glyphs, coverage, default_data_dir, load_profile, merge_profile, resolve_render_mode, save_profile
+from .profiles import accepted_glyphs, coverage, default_data_dir, load_profile, merge_profile, next_profile_version, resolve_render_mode, save_profile
 
 
 def parser():
@@ -26,6 +26,7 @@ def parser():
     train.add_argument("--calibration-document", type=Path, help="Semantic document to use for the calibration PDF")
     train.add_argument("--document", type=Path, help="Check whether the learned profile is ready for this requested document")
     train.add_argument("--mine", action="store_true", help="Search preserved pages for more forms and write a private review queue")
+    train.add_argument("--synthesize", action="store_true", help="Propose writer-conditioned variants for sparse forms; exact geometry still needs review")
     profile = sub.add_parser("profile", help="Create, inspect, update, and check private profiles")
     ps = profile.add_subparsers(dest="operation", required=True)
     create = ps.add_parser("create")
@@ -60,6 +61,20 @@ def parser():
     diversity.add_argument("profile")
     diversity.add_argument("--document", type=Path)
     diversity.add_argument("--mode", choices=["fresh_strokes", "clean_outline"])
+    synth = ps.add_parser("synthesize", help="Generate private, reviewable letter variants conditioned on the writer's own forms")
+    synth.add_argument("profile")
+    synth.add_argument("--characters")
+    synth.add_argument("--role")
+    synth.add_argument("--per-glyph", type=int, default=6)
+    synth.add_argument("--seed", type=int, default=72)
+    synth.add_argument("--output", required=True, type=Path)
+    review = ps.add_parser("review-variants", help="Apply exact-geometry review decisions and save a new private profile version")
+    review.add_argument("profile", help="Generated proposal-profile.json")
+    review.add_argument("--review", required=True, type=Path)
+    prefs = ps.add_parser("preferences", help="Remember whether to reproduce observed correction habits")
+    prefs.add_argument("profile")
+    prefs.add_argument("--corrections", required=True, choices=["sampled", "none"])
+    prefs.add_argument("--selected-by", default="cli-user")
     ps.add_parser("list")
     text = sub.add_parser("document", help="Convert a UTF-8 text file to literal document IR")
     text.add_argument("--text-file", required=True, type=Path)
@@ -112,7 +127,8 @@ def run(args):
     if args.command == "train":
         from .training import train_profile
         return train_profile(args.samples, args.id, prototype=args.prototype, observations=args.observations,
-                             calibration_document=args.calibration_document, document=args.document, mine=args.mine)
+                             calibration_document=args.calibration_document, document=args.document, mine=args.mine,
+                             synthesize=args.synthesize)
     if args.command == "profile":
         op = args.operation
         if op == "list":
@@ -134,6 +150,27 @@ def run(args):
             profile = load_profile(args.file)
             return _summary(profile, save_profile(profile))
         profile = load_profile(args.profile)
+        if op == "synthesize":
+            from .synthesis import synthesize_variants, write_synthesis_review
+            result = synthesize_variants(profile, args.characters, args.per_glyph, args.seed, role=args.role)
+            return {"ok": True, **result["summary"], **write_synthesis_review(result, args.output)}
+        if op == "review-variants":
+            from .synthesis import approve_variants
+            review = _read_json(args.review)
+            if not isinstance(review, dict) or not isinstance(review.get("decisions"), list) or not review["decisions"]:
+                raise InkformError("invalid_variant_review", "Supply a nonempty decisions list and an identified reviewer.")
+            reviewed = approve_variants(profile, review.get("decisions", []), review.get("reviewed_by"))
+            current_path = default_data_dir() / "profiles" / profile["profile_id"] / "current.json"
+            current = load_profile(profile["profile_id"]) if current_path.exists() else profile
+            # Retain concurrent evidence/profile preferences; merge only the
+            # requested derived decisions, never an old snapshot wholesale.
+            decisions = {row["glyph_id"] for row in review.get("decisions", [])}
+            updated = merge_profile(current, {"glyphs": [g for g in reviewed["glyphs"] if g["glyph_id"] in decisions]})
+            return _summary(updated, save_profile(updated))
+        if op == "preferences":
+            profile["output_preferences"] = {"corrections": args.corrections, "selected_by": args.selected_by}
+            profile["profile_version"] = next_profile_version(profile)
+            return _summary(profile, save_profile(profile))
         if op == "mine":
             from .mining import mine_candidates
             return mine_candidates(profile, args.samples, args.output, characters=args.characters,

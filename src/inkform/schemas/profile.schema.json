@@ -100,6 +100,46 @@
       },
       "additionalProperties": false
     },
+    "graph_style": {
+      "type": "object",
+      "required": ["version", "basis", "observation_ids", "source_refs", "pen_width_xheight", "axis_bow_xheight"],
+      "properties": {
+        "version": {"const": "inkform-graph-style-1"},
+        "basis": {"const": "reviewed_samples"},
+        "observation_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/safeId"}},
+        "source_refs": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/sourceRef"}},
+        "pen_width_xheight": {"type": "number", "minimum": 0.02, "maximum": 0.5},
+        "axis_bow_xheight": {
+          "type": "object", "required": ["horizontal", "vertical"],
+          "properties": {
+            "horizontal": {"type": "number", "minimum": 0, "maximum": 2},
+            "vertical": {"type": "number", "minimum": 0, "maximum": 2}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "output_preferences": {
+      "type": "object",
+      "properties": {
+        "corrections": {
+          "enum": [
+            "sampled",
+            "none"
+          ]
+        },
+        "selected_by": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "corrections",
+        "selected_by"
+      ],
+      "additionalProperties": false
+    },
     "corrections": {
       "type": "object",
       "required": [
@@ -390,6 +430,58 @@
         "reviewed_by": {"type": ["string", "null"], "minLength": 1},
         "fill_rule": {"const": "evenodd"},
         "variation_dimensions_observed": {"type": "boolean"},
+        "derivation": {
+          "type": "object",
+          "required": [
+            "version",
+            "basis",
+            "parent_glyph_ids",
+            "parent_geometry_sha256",
+            "geometry_sha256",
+            "independent_observation_count",
+            "review_status",
+            "reviewed_by"
+          ],
+          "properties": {
+            "version": {
+              "const": "inkform-style-family-1"
+            },
+            "basis": {
+              "const": "writer_conditioned_estimate"
+            },
+            "parent_glyph_ids": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/safeId"
+              }
+            },
+            "parent_geometry_sha256": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "geometry_sha256": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "independent_observation_count": {
+              "const": 0
+            },
+            "review_status": {
+              "$ref": "#/$defs/reviewStatus"
+            },
+            "reviewed_by": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
         "outline_calibration": {
           "type": "object",
           "required": ["body_x_height_mm"],

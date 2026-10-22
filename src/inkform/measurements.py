@@ -237,7 +237,8 @@ def measure_style(profile: dict) -> dict:
     """Summarize reviewed forms and trusted layout evidence without mutation."""
     validate_profile(profile)
     observations = {record["observation_id"]: record for record in profile.get("observations", [])}
-    accepted = accepted_glyphs(profile)
+    all_accepted = accepted_glyphs(profile)
+    accepted = [g for g in all_accepted if not g.get("derivation")]
     selected = {}
     for glyph in sorted(accepted, key=lambda g: (g["representation"] != "clean_outline", g["glyph_id"])):
         key = (glyph["role"], glyph["text"], _evidence_key(glyph, observations))
@@ -318,7 +319,8 @@ def measure_style(profile: dict) -> dict:
     if corrections is None:
         uncertainties.append("No correction habit is inferred without reviewed counts of all words and corrected words in representative source pages or regions.")
     return {"version": MEASUREMENT_VERSION, "synthetic": profile["synthetic"], "measurements": measurements,
-            "accepted_glyph_records": len(accepted), "unique_letter_form_samples": len(glyphs),
+            "accepted_glyph_records": len(all_accepted), "observed_glyph_records": len(accepted),
+            "derived_glyph_records": len(all_accepted)-len(accepted), "unique_letter_form_samples": len(glyphs),
             "form_geometry": forms, "word_gap_samples": gaps, "word_gap_exclusions": exclusions,
             "metric_updates": updates, "metric_update_evidence": evidence, "retained_metrics": copy.deepcopy(profile["metrics"]),
             "variation_update": variation, "correction_update": corrections, "correction_frequency_exclusions": correction_exclusions,

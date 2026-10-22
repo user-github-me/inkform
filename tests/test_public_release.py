@@ -107,3 +107,11 @@ def test_bundled_fixture_must_match_authoritative_generator(tmp_path):
 def test_invalid_archive_returns_failure_without_traceback(tmp_path):
     path = tmp_path/"broken.tgz"; path.write_text("broken")
     assert not guard.inspect_archive(path)["ok"]
+
+
+def test_varied_public_fixture_matches_its_authored_generator(tmp_path):
+    repository = Path(__file__).resolve().parents[1]
+    expected, errors = guard.check_varied_source_fixture(repository)
+    assert errors == [] and expected["synthetic"] is True
+    path = archive(tmp_path/"varied.whl", {"examples/synthetic-varied-profile.json": profile(glyphs=[])})
+    assert not guard.inspect_archive(path, expected_synthetic_varied_profile=expected)["ok"]

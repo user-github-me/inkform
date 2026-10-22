@@ -240,7 +240,7 @@ def profile():
 
 
 def test_final_pdf_audits_emitted_paths_without_embedding_written_text(tmp_path, profile):
-    result = render_document(literal_document("nnnn nnnn"), profile, tmp_path/"normal.pdf", preview_dpi=36)
+    result = render_document(literal_document("nn nn nn nn"), profile, tmp_path/"normal.pdf", preview_dpi=36)
     report = json.loads(Path(result["report"]).read_text())
     assert report["checks"]["repetition"] == "pass"
     assert report["checks"]["emitted_glyph_geometry"] == "pass"

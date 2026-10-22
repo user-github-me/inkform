@@ -20,9 +20,33 @@ Initial scale and pen values are calibration choices, not measurements establish
 
 A glyph may set `variation_dimensions_observed: false` when its width/height reflects a crop choice or a context transfer rather than an observed standalone form. Training retains its reviewed shape but excludes it from learned dimensional variation, and reports the excluded IDs. Document the reason and role transfer; a cropped graph-axis segment does not measure the writer's natural tends-arrow length.
 
+Generated style candidates have `derivation.version: inkform-style-family-1`,
+`basis: writer_conditioned_estimate`, exact parent IDs/hashes, their own geometry
+hash, and separate review status. Their `source_refs` equal the union of the
+recorded parents; `independent_observation_count` is zero and
+`variation_dimensions_observed` is false. Parents must be reviewed source forms
+of the same character, role, and representation, never other generated forms.
+Use the synthesis/review CLI to maintain these bindings. Reviewed derived forms
+are available for rendering but cannot inflate measured sample counts.
+
 At least three reviewed adjacent word gaps across two lines inform `word_gap` (bounded at 0.25), `word_gap_sample_count`, and `word_gap_observation_ids`. A zero sample count means unavailable evidence, not measured uniform spacing. See [observations.md](observations.md) for source hashes and layout-review requirements. `variation.amount` is optional, from 0 through 0.3, with default 0.1. It scales bounded learned and estimated amplitudes; zero disables geometric transforms while genuine variant selection remains available. Slant, baseline, and shape-warp axes remain estimated even when width and height are learned.
 
 `corrections` records `rate`, `basis`, `sampled_word_count`, `correction_count`, `observation_ids`, and `source_refs`. Personal learning uses `basis: "reviewed_samples"`; only authored public fixtures use `synthetic_demo`. The rate is bounded at 0.35 and is derived from reviewed representative passage counts, independently of the correction-mark geometry. No frequency evidence means no inferred habit. A reviewed mark alone can support an explicitly supplied document correction without establishing a rate.
+
+`output_preferences: {"corrections":"sampled","selected_by":"writer"}` records
+a correction choice separately from its measured habit. `none` disables sampled
+restarts; an explicit document choice takes precedence. The preferences CLI
+saves a new immutable version.
+
+`graph_style` optionally stores `version: inkform-graph-style-1`,
+`basis: reviewed_samples`, `observation_ids`, matching `source_refs`,
+`pen_width_xheight` (0.02–0.5), and `axis_bow_xheight` with horizontal and vertical
+values (0–2). Each referenced `kind: graph_style` observation retains a source
+hash, reviewed actor/status, crop `bbox_xywh`, `xheight_px`, `pen_width_px`, and
+`axes` with `orientation` and absolute source `trace_px` points. Validation
+recomputes perpendicular deviation from each endpoint chord and aggregates
+the reviewed measurements. Record static ink width only, not inferred pressure.
+The graph renderer scales this reviewed style while keeping data anchors fixed.
 
 To retain an actual mode preference, create an immutable version. Omit the feedback field until feedback exists; record the user's words accurately rather than inventing approval. This example saves only the mode:
 

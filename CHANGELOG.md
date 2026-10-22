@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 — 2026-10-22
+
+- Propose alternate letter constructions from the writer's reviewed forms with `profile synthesize` and `train --synthesize`. Complete PDF/PNG review atlases and exact-hash decisions keep inferred variants separate from observed evidence.
+- Audit repeated prose words after removing per-letter scale and shear; guide selection toward different approved constructions across the same and neighboring pages. Spacing changes cannot bypass this check.
+- Remember clean or sample-based correction preferences while retaining multiple reviewed strike and scribble styles. Explicit supplied deletions remain intact.
+- Draw explicit graphs with writer-shaped labels and arrowheads, reviewed source axis bow/ink width, preserved data anchors and ticks, and distinct open/filled markers. Verify emitted graph geometry against its declared content.
+- Add a copyable agent prompt and source/output examples to the introduction website. Public examples use authored synthetic handwriting; personal samples and generated documents stay private.
+
 ## 0.3.0 — 2026-10-22
 
 - Reject exact and near copies of ordinary letter and symbol shapes on the same and adjacent pages. Audit the actual emitted PDF paths, with separate limited-range reporting for simple dots and bars.

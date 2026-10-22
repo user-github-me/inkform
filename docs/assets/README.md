@@ -1,7 +1,7 @@
 # Public demonstration assets
 
 The handwriting SVGs and PDF are generated exclusively from
-`examples/synthetic-profile.json`, an authored, shareable coordinate set. They
+`examples/synthetic-varied-profile.json`, an authored, shareable coordinate set with local alternate constructions. They
 contain no personal samples, learned writer profiles, photographs, or raster ink.
 
 Run `.venv/bin/python docs/generate-assets.py` from the checkout to regenerate

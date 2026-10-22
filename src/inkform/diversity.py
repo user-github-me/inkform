@@ -42,8 +42,10 @@ def profile_diversity(profile: dict, document: dict | None = None, mode: str | N
     records, requests = [], []
     for role, text in sorted(set(groups) | set(needed)):
         glyphs = sorted(groups.get((role, text), []), key=lambda g: g['glyph_id'])
+        observed = [g for g in glyphs if not g.get('derivation')]
+        derived = [g for g in glyphs if g.get('derivation')]
         independent_forms, used_evidence = [], set()
-        for glyph in sorted(glyphs, key=lambda g: (len(source_evidence(g, observations)), g['glyph_id'])):
+        for glyph in sorted(observed, key=lambda g: (len(source_evidence(g, observations)), g['glyph_id'])):
             evidence = source_evidence(glyph, observations)
             if used_evidence.intersection(evidence):
                 continue
@@ -65,6 +67,7 @@ def profile_diversity(profile: dict, document: dict | None = None, mode: str | N
         need_more = occurrences > 0 and len(representatives) < target
         record = {'role': role, 'text': text, 'render_mode': mode,
                   'reviewed_records': len(glyphs), 'independent_source_observations': independent,
+                  'reviewed_derived_forms': len(derived),
                   'source_families': len(independent_forms), 'distinct_path_geometry': len(fingerprints),
                   'separated_shape_count': len(representatives), 'representative_glyph_ids': representatives,
                   'requested_occurrences': occurrences, 'collection_target_hint': target,
@@ -75,7 +78,7 @@ def profile_diversity(profile: dict, document: dict | None = None, mode: str | N
         if need_more:
             requests.append({'role': role, 'text': text, 'occurrences': occurrences,
                              'separated_shape_count': len(representatives), 'collection_target_hint': target,
-                             'action': 'Mine and review distinct occurrences from preserved pages; keep ordinary and hurried forms supported by those pages.'})
+                             'action': 'Mine distinct source forms, or synthesize and review writer-conditioned variants when observed variety is sparse; keep derived forms separate from observations.'})
     requests.sort(key=lambda r: (-r['occurrences'], r['role'], r['text']))
     return {'profile_id': profile['profile_id'], 'profile_version': profile['profile_version'],
             'mode': mode, 'synthetic': profile['synthetic'], 'threshold_mm_at_3mm_xheight': NEAR_THRESHOLD_MM,

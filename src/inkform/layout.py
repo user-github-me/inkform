@@ -16,6 +16,8 @@ from .profiles import accepted_glyphs, coverage, geometry_bounds, resolve_render
 from .variation import (OccurrenceVariation, stable_value, source_family, source_evidence, geometry_family,
                         contour_topology, interpolate_forms, curved_strokes)
 from .repetition import shape_descriptor, assess_pair, audit_repetition, NEAR_THRESHOLD_MM
+from .word_patterns import (audit_word_patterns, word_descriptor, compare_words,
+                            structural_descriptor, structural_distance, STRUCTURAL_THRESHOLD_MM)
 
 
 def map_strokes(strokes, transform):
@@ -51,6 +53,8 @@ class Box:
         result = copy.deepcopy(self)
         for item in result.items:
             item["strokes"] = map_strokes(item["strokes"], lambda px, py: (px + x, py + y))
+            if "graph_plot_anchors_mm" in item:
+                item["graph_plot_anchors_mm"] = [[px+x, py+y] for px, py in item["graph_plot_anchors_mm"]]
         return result
 
 
@@ -67,11 +71,13 @@ def join(boxes, gap=0):
 
 
 class Shaper:
-    def __init__(self, profile, seed, mode, size, nonces=None):
+    def __init__(self, profile, seed, mode, size, nonces=None, page_hints=None):
         self.profile, self.seed, self.mode, self.size = profile, seed, mode, size
         self.forms, self.variant_history, self.variant_choices = {}, {}, {}
-        self.history, self.current_page, self.nonces = {}, 0, nonces or {}
+        self.history, self.word_history, self.current_page, self.nonces = {}, {}, 0, dict(nonces or {})
         self.used_families = {}
+        self.word_targets = {}
+        self.page_hints = page_hints or {}
         self.observations = {entry["observation_id"]: entry for entry in profile.get("observations", [])}
         self.variation = OccurrenceVariation(profile, seed)
         self.corrections = []
@@ -81,7 +87,7 @@ class Shaper:
                 self.forms.setdefault((glyph["role"], glyph["text"]), []).append(glyph)
         for key, forms in self.forms.items():
             # One crop renamed or smoothed three times is still one example.
-            families, shapes, claimed_evidence = {}, set(), {}
+            families, shapes, claimed_evidence, derived = {}, set(), {}, []
             ordered = sorted(forms, key=lambda form: form["glyph_id"], reverse=True)
             # Prefer individual observed occurrences over a derivative claiming
             # several of them. A+B is not a third independent sample beside A/B.
@@ -90,12 +96,20 @@ class Shaper:
                 calibration = json.dumps(form.get("outline_calibration", {}), sort_keys=True)
                 family, shape = (source_family(form, self.observations), calibration), (geometry_family(form), calibration)
                 evidence = source_evidence(form, self.observations)
+                # An approved synthesis is a usable shape, never a new source
+                # observation. Keep its geometry bank beside the independent
+                # source pool instead of dropping it as a provenance alias.
+                if form.get("derivation"):
+                    if shape not in shapes:
+                        derived.append(form)
+                        shapes.add(shape)
+                    continue
                 claimed = claimed_evidence.setdefault(calibration, set())
                 if family not in families and shape not in shapes and not evidence.intersection(claimed):
                     families[family] = form
                     shapes.add(shape)
                     claimed.update(evidence)
-            self.forms[key] = sorted(families.values(), key=lambda form: form["glyph_id"])
+            self.forms[key] = sorted([*families.values(), *derived], key=lambda form: form["glyph_id"])
 
     def commit_page(self, page, items):
         """Correct provisional occurrence pages after physical line placement."""
@@ -109,9 +123,22 @@ class Shaper:
             self.history[key] = [record for record in records if record["page"] >= page-1]
             if not self.history[key]:
                 del self.history[key]
+        for text in list(self.word_history):
+            for record in self.word_history[text]:
+                if any(token in tokens for token in record["token_ids"]):
+                    record["page"] = page
+            self.word_history[text] = [record for record in self.word_history[text] if record["page"] >= page-1]
+            if not self.word_history[text]:
+                del self.word_history[text]
 
     @staticmethod
     def compatible(first, second):
+        # A derived bank entry is already an explicitly reviewed construction.
+        # Blending it back toward a parent can erase the very local differences
+        # that its synthesis/review established. Ordinary occurrence variation
+        # still applies, with its separate measured ink audit.
+        if first.get("derivation") or second.get("derivation"):
+            return False
         # Outlines need an explicitly reviewed point correspondence before
         # morphing. Matching contour counts alone cannot protect small counters.
         if first["representation"] != "centerline" or contour_topology(first) != contour_topology(second):
@@ -127,6 +154,8 @@ class Shaper:
         return max(deltas, default=0) < .42 and sum(deltas)/max(1,len(deltas)) < .24
 
     def glyph(self, text, role, token_id, size=None, word_id=None, position=0.5):
+        if token_id in self.page_hints:
+            self.commit_page(self.page_hints[token_id], [])
         size = self.size if size is None else size
         forms = self.forms.get((role, text), [])
         if not forms:
@@ -149,24 +178,35 @@ class Shaper:
         history_key = text
         choice_key = (role, text, size)
         used = self.used_families.setdefault(choice_key, set())
-        candidates = [form for form in forms if source_family(form, self.observations) not in used]
+        def selection_family(form):
+            return "derived:"+geometry_family(form) if form.get("derivation") else source_family(form, self.observations)
+        candidates = [form for form in forms if selection_family(form) not in used]
         if not candidates:
             used.clear()
             previous = self.variant_history.get(choice_key)
             candidates = [form for form in forms if form["glyph_id"] != previous] if len(forms) > 1 else list(forms)
-        start = min(len(candidates)-1, int(stable_value(self.seed, token_id, "variant")*len(candidates)))
+        selection_id = token_id if not self.nonces.get(token_id) else f"{token_id}\0retry-{self.nonces[token_id]}"
+        start = min(len(candidates)-1, int(stable_value(self.seed, selection_id, "variant")*len(candidates)))
         candidates = candidates[start:] + candidates[:start]
+        targets = self.word_targets.get(token_id, [])
+        if targets:
+            selected_ids = {form["glyph_id"] for form in candidates}
+            candidates += [form for form in forms if form["glyph_id"] not in selected_ids]
         word_id = word_id or token_id
         records = [record for record in self.history.get(history_key, []) if record["token_id"] != token_id]
-        best, best_distance = None, -1
+        best, best_distance, best_score = None, -1, None
         # A finite maximin search keeps every attempt inside the approved style
         # envelope. The final placed-page audit decides whether it is enough.
-        attempts = 1 if self.variation.amount == 0 or not records else 48
+        attempts = 1 if self.variation.amount == 0 or not (records or targets) else 48
         for trial in range(attempts):
             source = candidates[trial % len(candidates)]
             attempt = self.nonces.get(token_id, 0)*48 + trial
+            observed_count = len({source_family(form, self.observations) for form in forms if not form.get("derivation")})
             factors = self.variation.factors(source, token_id, word_id, position,
-                                             attempt=attempt, independent_forms=len(forms))
+                                             attempt=attempt, independent_forms=observed_count)
+            factors["derived_form_count"] = sum(bool(form.get("derivation")) for form in forms)
+            if source.get("derivation"):
+                factors["selected_derivation"] = copy.deepcopy(source["derivation"])
             g = source
             compatible = [peer for peer in forms if peer["glyph_id"] != source["glyph_id"] and self.compatible(source, peer)]
             refs = copy.deepcopy(source["source_refs"])
@@ -175,7 +215,7 @@ class Shaper:
                 ratio = .12 + .38*stable_value(self.seed, f"{token_id}:{attempt}", "blend-ratio")
                 g = interpolate_forms(source, peer, ratio)
                 factors["interpolation"] = {"glyph_ids": [source["glyph_id"], peer["glyph_id"]], "ratio": ratio,
-                                            "basis": "compatible_reviewed_geometry"}
+                                            "basis": "reviewed_writer_conditioned_estimates" if source.get("derivation") or peer.get("derivation") else "compatible_reviewed_geometry"}
                 for ref in peer["source_refs"]:
                     if ref not in refs:
                         refs.append(copy.deepcopy(ref))
@@ -189,15 +229,21 @@ class Shaper:
             assessments = [assess_pair(descriptor, record["descriptor"], threshold_mm=NEAR_THRESHOLD_MM+.003) for record in records] if descriptor else []
             conflicts = [pair for pair in assessments if pair["category"] in {"exact", "near"}]
             distance = min((pair["distance_mm"] for pair in assessments), default=1.)
-            if best is None or distance > best_distance:
+            construction = structural_descriptor(descriptor) if descriptor and targets else None
+            structural_minimum = min((structural_distance(construction, target) for target in targets), default=1.)
+            score = (not bool(conflicts), -len(conflicts), structural_minimum if targets else distance, distance)
+            item["variation"]["word_structure_distance_mm"] = round(structural_minimum, 7) if targets else None
+            item["variation"]["word_structure_guidance_reference_count"] = len(targets)
+            if best is None or score > best_score:
+                best_score = score
                 best, best_distance = (g, item, descriptor), distance
-            if not conflicts:
+            if not conflicts and (not targets or structural_minimum >= STRUCTURAL_THRESHOLD_MM+.003):
                 best, best_distance = (g, item, descriptor), distance
                 break
         g, item, descriptor = best
         factors = item["variation"]
         self.variant_history[choice_key] = item["glyph_id"]
-        used.add(source_family(next(form for form in forms if form["glyph_id"] == item["glyph_id"]), self.observations))
+        used.add(selection_family(next(form for form in forms if form["glyph_id"] == item["glyph_id"])))
         if descriptor is not None:
             self.history.setdefault(history_key, []).append({"token_id": token_id, "page": self.current_page,
                                                             "descriptor": descriptor})
@@ -211,12 +257,89 @@ class Shaper:
         return box
 
     def text(self, text, role, token_id, size=None):
+        if f"{token_id}:0" in self.page_hints:
+            self.commit_page(self.page_hints[f"{token_id}:0"], [])
         letters = clusters(text)
-        result = Box()
-        for i, c in enumerate(letters):
-            identity = f"{token_id}:{i}"
-            box = self.glyph(c, role, identity, size, token_id, i / max(1, len(letters) - 1))
-            result = join([result, box], gap=0.025 * (size or self.size) * self.variation.letter_gap(identity)) if result.items else box
+        words, current = [], []
+        for index, char in enumerate(letters+[""]):
+            if char and all(c.isalnum() for c in char):
+                current.append(index)
+            else:
+                if len(current) >= 3:
+                    words.append(("".join(letters[i] for i in current), current))
+                current = []
+        comparable = role == "text" and self.variation.amount
+        repeated = comparable and any(self.word_history.get(word) for word, _ in words)
+        previous_targets = self.word_targets
+        self.word_targets = {}
+        # Candidate words are transactional: rejected alternatives must not
+        # consume source families or poison the glyph/page history.
+        initial = ({key: list(value) for key, value in self.history.items()},
+                   self.variant_history.copy(), {key: set(value) for key, value in self.used_families.items()},
+                   self.nonces.copy())
+        best, best_score, hard_targets = None, None, {}
+        for attempt in range(8 if repeated else 1):
+            self.word_targets = {}
+            if repeated:
+                for word, indexes in words:
+                    references = hard_targets.get(word) or self.word_history.get(word, [])
+                    if references:
+                        for position, index in enumerate(indexes):
+                            # Guidance is bounded, while final comparison still
+                            # checks every recent word. Requiring each letter to
+                            # differ from every previous position would forbid
+                            # new combinations of an otherwise useful bank.
+                            chosen = len(references)-1 if attempt == 0 else min(len(references)-1,
+                                int(stable_value(self.seed, f"{token_id}:{index}:{attempt}", "word-reference")*len(references)))
+                            self.word_targets[f"{token_id}:{index}"] = [references[chosen]["descriptor"]["letters"][position]]
+            if attempt:
+                self.history = {key: list(value) for key, value in initial[0].items()}
+                self.variant_history = initial[1].copy()
+                self.used_families = {key: set(value) for key, value in initial[2].items()}
+                self.nonces = initial[3].copy()
+                for i in range(len(letters)):
+                    identity = f"{token_id}:{i}"
+                    self.nonces[identity] = self.nonces.get(identity, 0)+attempt
+                    # A nearly exhausted source cycle must not lock every
+                    # retry to its last, structurally similar family. Retry
+                    # against the full approved bank; visible-ink history and
+                    # the word audit still prevent repetition.
+                    self.used_families[(role, letters[i], size or self.size)] = set()
+            result = Box()
+            for i, c in enumerate(letters):
+                identity = f"{token_id}:{i}"
+                box = self.glyph(c, role, identity, size, token_id, i / max(1, len(letters) - 1))
+                for item in box.items:
+                    item.update(word_id=token_id, word_position=i)
+                result = join([result, box], gap=0.025 * (size or self.size) * self.variation.letter_gap(identity)) if result.items else box
+            descriptors, conflicts, scores, residuals, next_targets = [], [], [], [], {}
+            if comparable:
+                for word, indexes in words:
+                    desc = word_descriptor([result.items[i] for i in indexes])
+                    descriptors.append((word, indexes, desc))
+                    for record in self.word_history.get(word, []):
+                        comparison = compare_words(record["descriptor"], desc)
+                        scores.append(comparison["changed_letter_count"]/comparison["required_changed_letter_count"])
+                        residuals.extend(comparison["letter_distances_mm"])
+                        if comparison["category"] == "repeated_template":
+                            conflicts.append(comparison)
+                            next_targets.setdefault(word, []).append(record)
+            score = (min(scores, default=1), -len(conflicts), sum(residuals)/max(1, len(residuals)))
+            if best is None or score > best_score:
+                best_score = score
+                best = (result, descriptors,
+                        {key: list(value) for key, value in self.history.items()}, self.variant_history.copy(),
+                        {key: set(value) for key, value in self.used_families.items()}, self.nonces.copy())
+            if not conflicts:
+                break
+            hard_targets = next_targets
+        result, descriptors, self.history, self.variant_history, self.used_families, self.nonces = best
+        for item in result.items:
+            item["variation"]["word_candidate_count"] = attempt+1
+        for word, indexes, desc in descriptors:
+            self.word_history.setdefault(word, []).append({"page": self.current_page, "word_id": token_id,
+                "token_ids": [result.items[i]["token_id"] for i in indexes], "descriptor": desc})
+        self.word_targets = previous_targets
         return result
 
     def phrase(self, text, token_id):
@@ -353,7 +476,7 @@ class Shaper:
         raise InkformError("unsupported_math", f"Unsupported math type: {typ}")
 
 
-def _plan_document_once(document, profile, seed=72, mode=None, nonces=None):
+def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page_hints=None):
     validate_document(document); validate_profile(profile)
     mode = resolve_render_mode(profile, mode)
     representation = "centerline" if mode == "fresh_strokes" else "clean_outline"
@@ -370,9 +493,10 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None):
     if isinstance(margins, (int, float)):
         margins = dict.fromkeys(("top", "right", "bottom", "left"), margins)
     available = width - margins["left"] - margins["right"]
-    shaper = Shaper(profile, seed, mode, size, nonces)
+    shaper = Shaper(profile, seed, mode, size, nonces, page_hints)
     habit = profile.get("corrections", {})
-    sampled_rate = habit.get("rate", 0) if document.get("handwriting", {}).get("corrections", "sampled") == "sampled" and shaper.has_correction_mark() else 0
+    correction_mode = document.get("handwriting", {}).get("corrections", profile.get("output_preferences", {}).get("corrections", "sampled"))
+    sampled_rate = habit.get("rate", 0) if correction_mode == "sampled" and shaper.has_correction_mark() else 0
     line_height = profile["metrics"]["line_height"] * size
     word_gap = profile["metrics"]["word_gap"] * size
     instances, lines = [], []
@@ -401,8 +525,12 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None):
         cursor += max(line_height, ink_height + size * 0.65)
 
     for block in document["blocks"]:
-        if block["type"] == "display_math":
-            box = shaper.math(block["expression"], json.dumps(block["id"], ensure_ascii=True))
+        if block["type"] in {"display_math", "graph"}:
+            if block["type"] == "graph":
+                from .graphs import graph_box
+                box = graph_box(block["graph"], shaper, json.dumps(block["id"], ensure_ascii=True))
+            else:
+                box = shaper.math(block["expression"], json.dumps(block["id"], ensure_ascii=True))
             for item in box.items:
                 item.update(content_node_id=block["id"], block_id=block["id"])
             place(box, block["id"])
@@ -451,26 +579,42 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None):
     if len(set(token_ids)) != len(token_ids) or rendered != expected:
         raise InkformError("content_accounting_failed", "The shaped geometry must account for every required symbol in its exact role.", {"required": len(needed), "rendered": len(instances), "missing": [{"role": role, "text": text, "count": count} for (role, text), count in (expected - rendered).items()], "unexpected": [{"role": role, "text": text, "count": count} for (role, text), count in (rendered - expected).items()]})
     geometry_hash = hashlib.sha256(json.dumps(instances, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "variation": {"version": "inkform-occurrence-2", "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}}
+    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "graphs": getattr(shaper, "graphs", []), "variation": {"version": "inkform-occurrence-2", "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}}
 
 
 def plan_document(document, profile, seed=72, mode=None):
     """Shape, audit visible ink, and retry conflicting occurrences finitely."""
-    nonces = {}
+    nonces, page_hints = {}, {}
     for attempt in range(3):
-        plan = _plan_document_once(document, profile, seed, mode, nonces)
+        plan = _plan_document_once(document, profile, seed, mode, nonces, page_hints)
         report = audit_repetition(plan["instances"], policy={"amount": plan["variation"]["amount"], "strict_near": True})
         plan["repetition"] = report
+        words = audit_word_patterns(plan["instances"], amount=plan["variation"]["amount"])
+        plan["word_patterns"] = words
         plan["variation"]["audit_passes"] = attempt+1
         failures = [pair for pair in report.get("pairs", []) if pair["category"] in {"exact", "near"}]
         if report["unchecked_instances"] and plan["variation"]["amount"]:
             raise InkformError("repetition_audit_incomplete", "Some rendered ink could not be measured; strict non-repetition has not been verified.", {"repetition": report})
-        if plan["variation"]["amount"] == 0 or not (report["exact_count"] or report["near_count"] or report["unchecked_instances"]):
+        if plan["variation"]["amount"] == 0 or not (report["exact_count"] or report["near_count"] or report["unchecked_instances"] or words["repeated_word_count"]):
             return plan
+        # A word is provisionally shaped before we know whether its line spills
+        # onto another page. Reuse actual positions on the next pass so stale
+        # two-pages-old words cannot crowd out valid adjacent-page choices.
+        page_hints = {item["token_id"]: item["page"] for item in plan["instances"]}
         for pair in failures:
             token = pair["second_token_id"]
             nonces[token] = nonces.get(token, 0)+1
+        for pair in words["pairs"]:
+            for token in pair["second_token_ids"]:
+                nonces[token] = nonces.get(token, 0)+1
     missing = Counter((pair["role"], pair["text"]) for pair in failures)
-    raise InkformError("repetition_exhausted", "The reviewed style envelope cannot supply sufficiently different forms for this page and its neighbor. Add and review more examples of the listed characters or symbols, then render again.",
-                       {"repetition": report, "attempted_passes": 3,
+    by_token = {item["token_id"]: item for item in plan["instances"]}
+    for pair in words["pairs"]:
+        for token, distance in zip(pair["second_token_ids"], pair["letter_distances_mm"]):
+            if distance < pair["threshold_mm"]:
+                item = by_token[token]
+                missing[(item["role"], item["text"])] += 1
+    raise InkformError("repetition_exhausted", "The reviewed style envelope cannot supply sufficiently different forms or word constructions for this page and its neighbor. Mine more samples or synthesize and review writer-conditioned variants of the listed letters and symbols, then render again.",
+                       {"repetition": report, "word_patterns": words, "attempted_passes": 3,
+                        "repeated_words": sorted({pair["text"] for pair in words["pairs"]}),
                         "needed_samples": [{"role": role, "text": text, "conflicting_pairs": count} for (role,text),count in missing.items()]})

@@ -172,7 +172,7 @@ def _error(stage, exc):
 
 def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
                   observations: Path | None = None, calibration_document: Path | dict | None = None,
-                  document: Path | dict | None = None, mine: bool = False) -> dict:
+                  document: Path | dict | None = None, mine: bool = False, synthesize: bool = False) -> dict:
     """Import, learn from reviewed observations, persist, and calibrate locally.
 
     Existing current profiles are resumed. Raw photos alone result in
@@ -261,6 +261,20 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
         except (InkformError, OSError, ValueError, ImportError) as exc:
             diagnostics.append(_error("sample_mining", exc))
             mining = {"status": "failed", "diagnostic": _error("sample_mining", exc)}
+    synthesis = {"status": "not_requested"}
+    if synthesize:
+        from .synthesis import synthesize_variants, write_synthesis_review
+        characters = "".join(dict.fromkeys(r["text"] for r in diversity["collection_requests"]))
+        if characters:
+            try:
+                result = synthesize_variants(current, characters=characters)
+                synthesis = {"status": "needs_geometry_review" if result["proposals"] else "no_safe_candidates",
+                             **result["summary"], **write_synthesis_review(result, run_dir / "style-review")}
+            except (InkformError, OSError, ValueError, ImportError) as exc:
+                diagnostics.append(_error("style_synthesis", exc))
+                synthesis = {"status": "failed", "diagnostic": _error("style_synthesis", exc)}
+        else:
+            synthesis = {"status": "no_sparse_reviewed_forms", "independent_observations_added": 0}
     calibration_readiness = _readiness(current, calibration_source) if calibration_source else {"ready": False, "status": "no_reviewed_forms"}
     calibration_kind = "document" if calibration_readiness.get("renderable") else "atlas" if learned else "unavailable"
     calibration = {"kind": calibration_kind, "status": "planned" if learned else "unavailable", "planned_pdf_path": str(run_dir / ("calibration.pdf" if calibration_kind == "document" else "profile-atlas.pdf")) if learned else None,
@@ -272,7 +286,7 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
         "status": status, "sample_count": sample_count, "source_count": len(current["sources"]),
         "reviewed_glyph_count": len(learned), "geometry_status_counts": dict(Counter(g["geometry_status"] for g in current["glyphs"])),
         "stages": copy.deepcopy(stages), "imports": imports, "measurements": measurements, "coverage": _inventory(current),
-        "diversity": diversity, "sample_mining": mining,
+        "diversity": diversity, "sample_mining": mining, "style_synthesis": synthesis,
         "document_readiness": readiness, "calibration": copy.deepcopy(calibration), "report_path": str(run_dir / "training-report.json"),
         "uncertainties": list(measurements["uncertainties"]),
         "next_action": "Inspect the samples and supply labeled, reviewed vector observations; importing photos alone does not train forms." if status == "awaiting_observations" else "Compare proposed geometry with its exact source evidence and record label/geometry review." if status == "needs_geometry_review" else "Review the diversity requests and mined candidates, retain distinct source forms, then repeat calibration and actual-PDF repetition checks. Inspect an actual-size print separately."}
@@ -294,7 +308,7 @@ def train_profile(samples: Path, profile_id: str, prototype: Path | None = None,
         "sample_count": sample_count, "source_count": len(current["sources"]), "reviewed_glyph_count": len(learned),
         "default_render_mode": mode, "stages": stages, "coverage": current["training"]["coverage"],
         "document_readiness": readiness, "calibration": calibration, "measurements": measurements,
-        "diversity": diversity, "sample_mining": mining,
+        "diversity": diversity, "sample_mining": mining, "style_synthesis": synthesis,
         "diagnostics": diagnostics, "imports": imports, "next_action": current["training"]["next_action"], "report_path": str(run_dir / "training-report.json")}
     report_path = Path(report["report_path"])
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False, allow_nan=False) + "\n", encoding="utf-8")

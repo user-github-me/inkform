@@ -65,6 +65,23 @@ def _width_at(samples, s):
 
 def draw_instance(c, item, height):
     c.setLineCap(1); c.setLineJoin(1)
+    if "paper_knockout" in item:
+        paths = item.get("strokes", [])
+        if (item["paper_knockout"] != "open_graph_marker" or item.get("role") != "graph.marker"
+                or item.get("content_kind") != "graph_primitive" or item.get("semantic") is not False
+                or item.get("representation") != "centerline" or len(paths) != 1
+                or not paths[0].get("closed") or len(paths[0]["segments"]) != 4
+                or any(segment["type"] != "cubic" for segment in paths[0]["segments"])):
+            raise InkformError("invalid_paper_knockout", "Paper knockouts are reserved for explicit closed open-graph markers.")
+        # A single B* paints the paper interior before the same path's pen
+        # outline. PDF validation checks this operation and its bounded marker
+        # geometry, so a curve cannot silently show through the open point.
+        c.saveState()
+        c.setFillColorRGB(1, 1, 1)
+        c.setLineWidth(item["pen_width_mm"] * PT)
+        c.drawPath(_path(c, paths[0], height), fill=1, stroke=1, fillMode=0)
+        c.restoreState()
+        return
     if item["representation"] == "clean_outline":
         combined = c.beginPath()
         for stroke in item["strokes"]:

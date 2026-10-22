@@ -237,6 +237,8 @@ def _validate_style_models(profile: dict, observations: dict) -> None:
                 glyph = glyphs.get(identity)
                 if glyph is None or (glyph["role"], glyph["text"]) != form:
                     _invalid("Variation evidence must name reviewed glyphs of the same form.", path)
+                if glyph.get("derivation") or glyph.get("variation_dimensions_observed") is False:
+                    _invalid("Derived shapes and crop-chosen dimensions are not independent observed variation evidence.", path)
                 refs = glyph["source_refs"]
                 if not refs or any(ref.get("observation_id") not in observations for ref in refs):
                     _invalid("Learned variation requires observation provenance for every sample.", path)
@@ -401,8 +403,47 @@ def validate_profile(profile: dict) -> dict:
                 positions = [sample["s"] for sample in samples]
                 if positions[0] != 0 or positions[-1] != 1 or any(a >= b for a, b in zip(positions, positions[1:])):
                     _invalid("Width profiles must run from 0 to 1 with strictly increasing positions.", f"{stroke_path}/width_profile")
+    _validate_derivations(profile)
     _validate_style_models(profile, observations)
+    if "graph_style" in profile:
+        from .graphs import validate_graph_style
+        validate_graph_style(profile)
     return profile
+
+
+def _validate_derivations(profile):
+    """Bind estimated style variants to immutable parents and exact review ink."""
+    from .geometry import geometry_hash
+    glyphs = {g["glyph_id"]: g for g in profile["glyphs"]}
+    for index, glyph in enumerate(profile["glyphs"]):
+        derived = glyph.get("derivation")
+        if derived is None:
+            continue
+        path = f"/glyphs/{index}/derivation"
+        parents = derived["parent_glyph_ids"]
+        hashes = derived["parent_geometry_sha256"]
+        if not parents or len(parents) != len(set(parents)) or len(parents) != len(hashes):
+            _invalid("Derived forms require distinct parent IDs with corresponding geometry hashes.", path)
+        refs = set()
+        for parent_id, expected in zip(parents, hashes):
+            parent = glyphs.get(parent_id)
+            if (not parent or parent.get("derivation") or parent["label_status"] != "reviewed"
+                    or parent["geometry_status"] != "reviewed" or geometry_hash(parent) != expected):
+                _invalid("Derived forms require unchanged reviewed, non-derived parent geometry.", path)
+            if any(parent[key] != glyph[key] for key in ("text", "role", "representation")):
+                _invalid("Derived variants must retain the parent character, role and representation.", path)
+            refs.update(json.dumps(ref, sort_keys=True) for ref in parent["source_refs"])
+        if refs != {json.dumps(ref, sort_keys=True) for ref in glyph["source_refs"]}:
+            _invalid("Derived forms must retain exactly their parent source provenance.", path)
+        if derived["geometry_sha256"] != geometry_hash(glyph):
+            _invalid("Derived review must bind the exact current geometry.", path)
+        if glyph.get("variation_dimensions_observed") is not False:
+            _invalid("Synthesized dimensions cannot claim new observed evidence.", path)
+        if derived["review_status"] != glyph["geometry_status"]:
+            _invalid("Derived form review status must match its geometry review.", path)
+        if derived["review_status"] in {"reviewed", "rejected"}:
+            if not reviewed_actor(derived["reviewed_by"]) or derived["reviewed_by"] != glyph["reviewed_by"]:
+                _invalid("A derived geometry decision must name its reviewer.", path)
 
 
 def accepted_glyphs(profile: dict) -> list[dict]:

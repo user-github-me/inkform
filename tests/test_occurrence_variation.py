@@ -52,7 +52,9 @@ def correction_document(deleted="old word", text="new word", mode="none"):
 
 
 def test_repeated_single_exemplar_n_differs_inside_same_word_and_seed_is_stable(profile):
-    document = literal_document("nnnn nnnn nnnn")
+    # Occurrence deformation is not proof of new word constructions. Repeated
+    # lexical words from this single template are covered by word-pattern tests.
+    document = literal_document("nnnnnnnnnnnn")
     plan = plan_document(document, profile, seed=31)
     assert len({item["glyph_id"] for item in plan["instances"]}) == 1
     assert len({json.dumps(normalized(item), sort_keys=True) for item in plan["instances"]}) == 12
@@ -95,8 +97,8 @@ def test_aliases_do_not_inflate_exemplar_count_and_preceding_nodes_share_history
     alternate = copy.deepcopy(next(g for g in profile["glyphs"] if (g["role"], g["text"]) == ("text", "n")))
     alternate["glyph_id"] += ".alternate"
     profile["glyphs"].append(alternate)
-    document = literal_document("nnnn nnnn")
-    document["blocks"].insert(0, {"id": "other", "type": "paragraph", "children": [{"id": "other-text", "type": "text", "text": "nnnn"}]})
+    document = literal_document("nn nn nn nn")
+    document["blocks"].insert(0, {"id": "other", "type": "paragraph", "children": [{"id": "other-text", "type": "text", "text": "nn nn"}]})
     plan = plan_document(document, profile)
     assert len({item["glyph_id"] for item in plan["instances"]}) == 1
     assert {item["variation"]["independent_form_count"] for item in plan["instances"]} == {1}
@@ -151,7 +153,7 @@ def test_maximum_variation_preserves_outline_counters_and_ink_extents(profile):
     glyph["ink_bounds"] = [0, -1, 1, 0]
     profile["glyphs"] = [glyph]
     profile["variation"] = {"amount": 0.3}
-    document = literal_document("nnnn nnnn nnnn nnnn")
+    document = literal_document("nn nn nn nn nn nn nn nn")
     document["page"] = {"width_mm": 50, "height_mm": 45, "margins_mm": 8}
     plan = plan_document(document, profile, mode="clean_outline")
     for item in plan["instances"]:
@@ -165,6 +167,7 @@ def test_maximum_variation_preserves_outline_counters_and_ink_extents(profile):
 @pytest.mark.parametrize("replacement", ["new word", ""])
 def test_explicit_correction_keeps_deleted_ink_out_of_semantic_counts(profile, replacement):
     profile = with_mark(profile)
+    profile["variation"] = {"amount": 0}  # This fixture tests exact semantic accounting.
     document = correction_document(text=replacement)
     original = copy.deepcopy(document)
     plan = plan_document(document, profile)
@@ -197,6 +200,7 @@ def test_explicit_correction_checks_deleted_coverage_and_requires_reviewed_mark(
 
 def test_sampled_restarts_are_deterministic_and_require_habit_plus_reviewed_mark(profile):
     document = literal_document("small notes " * 8)
+    profile["variation"] = {"amount": 0}  # Restart policy is independent of allograph synthesis.
     no_habit = with_mark(profile)
     assert not plan_document(document, no_habit)["corrections"]
     profile = with_mark(profile, .25)
@@ -238,6 +242,7 @@ def test_sampled_restart_that_cannot_fit_falls_back_to_the_original_word(profile
 
 def test_clean_outline_body_can_use_separate_centerline_crossout(profile):
     profile = with_mark(profile)
+    profile["variation"] = {"amount": 0}
     for glyph in profile["glyphs"]:
         if glyph["role"] != "mark.correction":
             glyph["representation"] = "clean_outline"
@@ -252,6 +257,7 @@ def test_clean_outline_body_can_use_separate_centerline_crossout(profile):
 def test_pdf_correction_sidecars_retain_source_and_account_for_vector_marks(profile, tmp_path):
     document = correction_document()
     profile = with_mark(profile)
+    profile["variation"] = {"amount": 0}  # Semantic sidecar/export contract, not diversity evidence.
     result = render_document(document, profile, tmp_path / "correction.pdf", preview_dpi=72)
     assert result["ok"]
     manifest = json.loads((tmp_path / "correction.build.json").read_text())

@@ -93,6 +93,19 @@ def test_default_training_calibration_exercises_repeated_forms(inputs):
     assert checked['repetition']['exact_count'] == checked['repetition']['near_count'] == 0
 
 
+def test_training_synthesis_is_review_queue_not_automatic_evidence(inputs):
+    writer = approved_writer(inputs, 'style-queue-writer')
+    trained = train_profile(inputs['samples'], writer, observations=inputs['manifest'],
+                            document=literal_document('oooo'), synthesize=True)
+    assert trained['ok'], trained['diagnostics']
+    queue = trained['style_synthesis']
+    assert queue['status'] in {'needs_geometry_review', 'no_safe_candidates'}
+    assert queue['independent_observations_added'] == 0
+    assert Path(queue['review_pdf']).is_file()
+    assert all(not g.get('derivation') for g in load_profile(writer)['glyphs'])
+    assert trained['reviewed_glyph_count'] == 1
+
+
 def test_raw_to_reviewed_outlines_selects_writer_default_and_renders_real_pdf(inputs):
     raw = train_profile(inputs["samples"], "first-writer")
     original_path = Path(raw["profile_path"])

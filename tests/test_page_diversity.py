@@ -27,7 +27,7 @@ def test_distinct_ink_spans_content_nodes_and_adjacent_pages(profile):
     document = literal_document("")
     document["page"] = {"width_mm": 60, "height_mm": 35, "margins_mm": 5}
     document["blocks"] = [{"id": f"paragraph-{i}", "type": "paragraph", "children": [
-        {"id": f"text-{i}", "type": "text", "text": "nnnn"}]} for i in range(8)]
+        {"id": f"text-{i}", "type": "text", "text": "nn nn"}]} for i in range(8)]
     plan = plan_document(document, profile, seed=31)
     assert plan["page_count"] >= 3
     assert_distinct(plan)

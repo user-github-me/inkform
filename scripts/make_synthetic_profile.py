@@ -144,6 +144,83 @@ CORRECTIONS = {
     "double": "M .05 .66 C 1.02 .53 1.84 .75 2.62 .52 L 3.84 .61 M 3.94 .27 C 2.99 .41 2.02 .22 1.27 .41 L .01 .33",
 }
 
+# Additional drawings for the *varied* public specimen. These intentionally
+# alter local constructions (shoulders, terminals, bowls and dot placement),
+# rather than stretching or renaming the sparse fixture's paths. They are
+# authored demonstration coordinates, never purported user observations.
+ALTERNATES = {
+    "n": [
+        "M .10 .02 L .10 .95 M .10 .60 L .34 .91 L .74 .91 L .74 .02",
+        "M .07 .10 C .16 -.04 .23 .56 .18 .93 L .19 .49 C .44 1.10 .77 .97 .76 .47 C .70 .06 .86 -.01 1.06 .23",
+        "M .12 .01 L .17 .97 M .16 .43 C .30 .80 .71 .89 .73 .50 C .74 .24 .65 .07 .80 .02",
+        "M .10 .02 L .16 .98 L .15 .47 C .34 1.18 .95 1.02 .72 .46 L .71 .02",
+        "M .10 .02 L .16 .98 M .16 .61 L .33 .92 C .46 1.03 .78 1.00 .79 .70 C .81 .40 .67 .10 .84 .02",
+        "M .08 .03 L .17 .91 M .14 .64 C .51 1.29 .94 1.04 .85 .54 C .78 .20 .78 .05 1.01 .07",
+    ],
+    "m": [
+        "M .11 .03 L .11 .98 M .12 .55 L .30 1.15 L .65 1.15 L .60 .03 M .61 .48 L .85 .82 L 1.16 .82 L 1.12 .03",
+        "M .09 .03 L .16 .95 M .17 .48 C .32 .88 .61 .96 .63 .52 L .61 .02 M .64 .52 C .86 1.55 1.34 1.24 1.21 .55 C 1.10 .18 1.11 .01 1.36 .09",
+        "M .10 .02 L .17 .98 M .15 .53 C .26 .86 .51 .92 .53 .54 L .51 .03 M .53 .55 C .86 1.23 1.21 1.05 1.08 .51 L 1.07 .02",
+        "M .08 .02 L .16 .91 M .14 .59 C .45 1.31 .78 1.04 .62 .59 L .60 .03 M .64 .53 C .82 .85 1.16 .91 1.14 .48 C 1.12 .17 1.07 .05 1.29 .07",
+        "M .09 .03 L .13 .95 M .14 .60 L .32 .93 C .54 1.16 .66 .93 .62 .66 L .57 .02 M .61 .61 L .83 .93 C 1.03 1.17 1.20 .98 1.17 .61 L 1.11 .02",
+        "M .08 .06 C .16 .21 .17 .77 .20 .96 L .16 .52 C .45 1.02 .65 1.16 .70 .77 L .64 .12 C .87 1.07 1.32 1.11 1.24 .65 L 1.15 .04",
+    ],
+    "i": [
+        "M .22 .94 L .15 .20 C .11 -.05 .41 -.07 .55 .09 M .20 1.25 L .23 1.30",
+        "M .20 .88 C .10 .63 .30 .42 .17 .03 M .40 1.38 L .42 1.40",
+        "M .25 .91 L .17 .03 L .47 .02 M .13 1.34 L .15 1.39",
+        "M .27 .96 C .32 .64 .05 .29 .22 .08 C .32 -.04 .49 .06 .51 .19 M .33 1.45 L .35 1.48",
+    ],
+    "l": [
+        "M .24 1.51 L .10 .20 C .05 -.11 .49 -.03 .65 .14",
+        "M .16 .03 C .30 .80 .57 1.65 .30 1.55 C .09 1.48 .02 .79 .12 .32 C .18 .00 .41 -.02 .47 .06",
+        "M .27 1.55 C .05 .90 .25 .58 .11 .17 L .11 .02 L .48 .01",
+        "M .25 1.49 C .13 .86 -.01 .17 .19 .04 C .41 -.09 .65 .09 .62 .29",
+    ],
+    "r": [
+        "M .12 .02 L .18 .96 M .16 .45 C .31 .88 .66 1.00 .73 .70 L .63 .56",
+        "M .12 .01 L .18 .95 L .14 .52 L .44 1.05 C .61 1.17 .77 1.04 .84 .93",
+        "M .13 .02 L .15 .89 M .15 .61 C .33 1.02 .50 1.11 .59 .97 C .70 .82 .80 .84 .88 1.01",
+        "M .12 .03 C .18 .34 .12 .79 .25 .98 M .17 .53 C .39 1.04 .87 1.01 .81 .67",
+    ],
+    "e": [
+        "M .80 .83 C .62 1.13 .14 1.07 .12 .57 C .11 .02 .50 -.03 .81 .20 M .12 .57 L .68 .57",
+        "M .12 .56 L .69 .60 C 1.04 .75 .70 1.16 .34 .93 C -.08 .66 .10 -.12 .82 .12",
+        "M .16 .37 C .33 .34 .72 .52 .73 .78 C .68 1.14 .12 1.08 .10 .55 C .06 .02 .61 -.03 .90 .28",
+        "M .10 .53 C .46 .30 .85 .66 .64 .88 C .48 1.12 .16 .95 .10 .68 C -.08 .15 .29 -.03 .76 .01",
+        "M .11 .62 C .35 .46 .79 .60 .76 .82 C .74 1.04 .48 1.02 .24 .82 C -.08 .57 .21 -.13 .83 .21",
+    ],
+    "p": [
+        "M .18 -.52 L .25 1.05 M .23 .88 C .58 1.15 .92 1.09 .80 .73 C .67 .55 .39 .56 .20 .66",
+        "M .14 -.35 L .23 1.12 M .21 .84 L .40 1.06 L .86 .98 L .91 .55 L .67 .21 L .17 .28",
+        "M .14 -.78 L .22 .99 M .19 .74 C .51 1.14 .85 .91 .77 .59 C .67 .23 .39 .24 .17 .42",
+        "M .12 -.27 L .22 1.04 M .20 .69 C .60 1.42 1.07 1.05 .91 .52 C .79 .15 .41 .05 .17 .36",
+        "M .11 -.47 L .18 .95 M .17 .50 C .48 .96 .92 .82 .76 .35 C .66 .05 .31 .10 .17 .34",
+        "M .12 -.44 L .22 .97 M .17 .73 C .48 1.22 1.02 .91 .82 .53 C .67 .19 .37 .23 .18 .44",
+        "M .09 -.46 C .26 -.11 .08 .59 .25 1.02 M .18 .65 L .43 .94 C .78 1.22 1.00 .82 .76 .44 C .63 .21 .31 .25 .17 .32",
+    ],
+    "y": [
+        "M .12 .97 C .03 .45 .37 .07 .61 .31 M .86 .95 C .56 .43 .46 -.51 .08 -.50 L -.04 -.37",
+        "M .10 .99 C .24 .63 .35 .33 .59 .36 M .88 1.00 L .32 -.31 C .21 -.55 .08 -.53 -.04 -.46",
+        "M .09 .96 L .34 .20 L .54 .28 M .89 .97 C .69 .50 .57 -.20 .27 -.49 C .12 -.63 -.04 -.52 -.01 -.32",
+    ],
+    "t": [
+        "M .42 1.39 C .28 .87 .21 .11 .40 .02 L .75 .09 M .09 .60 L .84 .64",
+        "M .35 1.39 L .24 .18 C .25 -.07 .61 -.06 .70 .18 M .01 1.15 L .67 1.16",
+        "M .44 1.40 L .26 .02 L .67 .02 M .07 .87 C .25 .73 .62 .76 .87 .99",
+    ],
+    "f": [
+        "M .09 -.53 C .35 .25 .34 .89 .45 1.41 C .53 1.65 .86 1.43 .73 1.17 M .04 .56 L .74 .59",
+        "M .05 -.35 L .42 1.32 C .59 1.62 .82 1.47 .77 1.26 M .03 1.08 L .72 1.07",
+        "M .02 -.44 C .45 -.43 .06 1.23 .55 1.45 L .84 1.41 M .11 .70 L .76 .77",
+    ],
+    "c": [
+        "M .75 .93 L .49 1.03 L .18 .89 L .11 .38 L .28 .02 L .75 .13",
+        "M .77 .75 C 1.11 1.10 .03 1.23 .12 .45 C .10 -.02 .81 -.08 .83 .30",
+        "M .78 .87 C .76 1.26 .12 1.02 .09 .43 C .08 -.04 .61 -.10 .86 .29",
+    ],
+}
+
 
 def parse_path(description: str) -> list[dict]:
     tokens = re.findall(r"[MLCZ]|[-+]?(?:\d+(?:\.\d*)?|\.\d+)", description)
@@ -227,12 +304,29 @@ def build_profile() -> dict:
     }
 
 
+def build_varied_profile() -> dict:
+    profile = build_profile()
+    profile.update(profile_id="synthetic-varied-demo", display_name="Inkform authored alternate constructions",
+                   description="Public repeated-word demonstration with independently authored local letter constructions; no user handwriting, learned observations, or converted fonts.")
+    for character, descriptions in ALTERNATES.items():
+        for role in ("text", "math.variable", "math.function"):
+            for index, description in enumerate(descriptions, 1):
+                alternate = glyph(character, role, description)
+                alternate["glyph_id"] += f".authored-{index}"
+                profile["glyphs"].append(alternate)
+    return profile
+
+
 def main():
     destination = Path(__file__).resolve().parents[1] / "examples" / "synthetic-profile.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     profile = build_profile()
     destination.write_text(json.dumps(profile, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     print(f"Wrote {len(profile['glyphs'])} synthetic vector glyphs to {destination}")
+    varied = build_varied_profile()
+    varied_path = destination.with_name("synthetic-varied-profile.json")
+    varied_path.write_text(json.dumps(varied, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    print(f"Wrote {len(varied['glyphs'])} authored alternate glyphs to {varied_path}")
 
 
 if __name__ == "__main__":

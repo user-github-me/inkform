@@ -29,6 +29,18 @@ MAX_DESCRIPTOR_PIXELS = 2_000_000
 MAX_REPORTED_PAIRS = 1000
 
 
+def is_graph_primitive(item):
+    """Data geometry has fixed coordinates; its separate ledger is validated.
+
+    Writer labels and sampled arrows are ordinary glyphs and never excluded.
+    The PDF checker requires every primitive to match its explicit graph data,
+    and still verifies the emitted paths against the planned geometry.
+    """
+    return (isinstance(item, dict) and item.get("content_kind") == "graph_primitive"
+            and item.get("semantic") is False and item.get("role") in
+            {"graph.axis", "graph.curve", "graph.marker", "graph.tick"})
+
+
 @dataclass
 class ShapeDescriptor:
     fingerprint: str
@@ -383,11 +395,15 @@ def audit_repetition(instances, *, policy=None):
               "pairs": [], "pair_count": 0,
               "exact_count": 0, "near_count": 0, "limited_count": 0, "checked_instance_count": 0,
               "unchecked_instances": [], "comparison_count": 0, "truncated": False}
+    report["excluded_graph_primitive_tokens"] = []
     def page_key(pair):
         page = pair[1].get("page") if isinstance(pair[1], dict) else None
         return (page if isinstance(page, int) and not isinstance(page, bool) else -1, pair[0])
     ordered = sorted(enumerate(instances), key=page_key)
     for instance_index, item in ordered:
+        if is_graph_primitive(item):
+            report["excluded_graph_primitive_tokens"].append(item.get("token_id"))
+            continue
         if (not isinstance(item, dict) or not isinstance(item.get("page"), int) or isinstance(item.get("page"), bool)
                 or item["page"] < 0 or not item.get("role") or not item.get("text")):
             report["unchecked_instances"].append({"instance": instance_index, "reason": "missing role, text or valid page"})

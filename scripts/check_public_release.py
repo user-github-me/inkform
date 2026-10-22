@@ -106,7 +106,7 @@ def _entries(archive: Path):
                 yield member.name, member.size, member.isdir(), special, read
 
 
-def inspect_archive(archive: Path, allowed_synthetic_assets=(), expected_synthetic_profile=None) -> dict:
+def inspect_archive(archive: Path, allowed_synthetic_assets=(), expected_synthetic_profile=None, expected_synthetic_varied_profile=None) -> dict:
     """Return counts and path-level violations; never extract an archive member."""
     archive = Path(archive)
     allowed = _allowed_assets(allowed_synthetic_assets)
@@ -166,6 +166,8 @@ def inspect_archive(archive: Path, allowed_synthetic_assets=(), expected_synthet
                     reject(name, reason)
                 if PurePosixPath(name).name == "synthetic-profile.json" and expected_synthetic_profile is not None and value != expected_synthetic_profile:
                     reject(name, "bundled synthetic profile differs from its authored generator")
+                if PurePosixPath(name).name == "synthetic-varied-profile.json" and expected_synthetic_varied_profile is not None and value != expected_synthetic_varied_profile:
+                    reject(name, "bundled varied synthetic profile differs from its authored generator")
     except (OSError, tarfile.TarError, zipfile.BadZipFile, RuntimeError) as error:
         reject(archive.name, f"archive could not be inspected: {type(error).__name__}")
     report["ok"] = not report["violations"]
@@ -188,6 +190,21 @@ def check_source_fixture(repository: Path) -> tuple[dict | None, list[str]]:
     return expected, errors
 
 
+def check_varied_source_fixture(repository: Path) -> tuple[dict | None, list[str]]:
+    generator = repository / "scripts" / "make_synthetic_profile.py"
+    fixture = repository / "examples" / "synthetic-varied-profile.json"
+    if not generator.is_file() or not fixture.is_file():
+        return None, ["Authored varied generator and fixture must exist in the release checkout"]
+    expected = runpy.run_path(str(generator))["build_varied_profile"]()
+    actual = json.loads(fixture.read_text(encoding="utf-8"))
+    errors = _profile_violations(actual)
+    if actual != expected:
+        errors.append("Varied synthetic source fixture differs from its authored generator")
+    if actual.get("license") != "MIT":
+        errors.append("Varied synthetic source fixture must declare the project MIT license")
+    return expected, errors
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("archives", type=Path, nargs="+", help="npm .tgz, Python .tar.gz/.whl, or skill .zip")
@@ -196,7 +213,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     try:
         expected, errors = check_source_fixture(Path(__file__).resolve().parents[1])
-        reports = [inspect_archive(path, args.allow_synthetic_asset, expected) for path in args.archives]
+        varied, varied_errors = check_varied_source_fixture(Path(__file__).resolve().parents[1])
+        errors.extend(varied_errors)
+        reports = [inspect_archive(path, args.allow_synthetic_asset, expected, varied) for path in args.archives]
     except (OSError, ValueError, KeyError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, indent=2))
         return 1

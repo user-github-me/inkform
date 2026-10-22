@@ -6,7 +6,9 @@
 
 Inkform is an open-source Python engine and agent skill for learning reusable private handwriting profiles and producing printable vector PDFs. It fits the writer's own reviewed forms, preserves genuine variants, and keeps text and mathematical roles separate.
 
-This is a working **0.3 implementation**, with a profile importer, reviewed vector geometry, semantic layout, a command-line interface, and actual PDF checks. Personal resemblance and print quality still need calibration. It is not a fully automatic photo-to-handwriting model.
+This is a working **0.4 implementation**, with a profile importer, reviewed vector geometry, semantic layout, a command-line interface, and actual PDF checks. Personal resemblance and print quality still need calibration. It is not a fully automatic photo-to-handwriting model.
+
+Version 0.4 adds writer-conditioned letter proposals, a stronger check for repeated whole-word constructions, remembered correction preferences, and graphs with the writer's labels, arrowheads, and source-reviewed axis style. Generated variants require visual review and never count as additional photographed samples.
 
 Inkform includes sample-first training, portable reviewed observations, smooth cubic outline refinement, and 300 dpi previews. A writer can choose `default_render_mode: clean_outline` to retain fuller, sample-derived forms. An explicit `--mode` overrides that preference. The PDF itself remains vector at every preview resolution.
 
@@ -39,7 +41,7 @@ cd inkform
 uv venv --python 3.12
 uv pip install -e '.[dev]'
 .venv/bin/inkform render examples/calibration.json \
-  --profile examples/synthetic-profile.json --seed 72 \
+  --profile examples/synthetic-varied-profile.json --seed 72 \
   --output build/demo.pdf
 .venv/bin/inkform check build/demo.pdf --manifest build/demo.build.json
 .venv/bin/pytest -q
@@ -56,7 +58,7 @@ inkform train --id my-writing --samples ./writing-samples
 # The agent reviews sample forms and their fitted geometry, then resumes:
 inkform train --id my-writing --samples ./writing-samples \
   --observations ./reviewed-observations.json \
-  --calibration-document calibration.json --document document.json --mine
+  --calibration-document calibration.json --document document.json --mine --synthesize
 inkform render document.json --profile my-writing --output build/notes.pdf
 ```
 
@@ -68,6 +70,8 @@ Include multiple occurrences of frequent letters and symbols, ordinary word spac
 
 `profile diversity` identifies overused forms and counts physically distinct reviewed shapes. `profile mine` searches preserved pages for more examples using the writer's own masks and writes a private queue with source context. Candidates require label and geometry review; they are not automatically accepted. The skill repeats collection, calibration, actual-PDF checking, and visual inspection until the requested document passes or an evidence gap remains. More samples help when they contain genuinely different forms.
 
+When a character has too few examples, `profile synthesize` proposes alternate constructions from its accepted writer forms. Inspect the complete source/proposal PDF atlas and record exact-hash decisions. The agent can perform this review as part of the skill workflow; new styles remain identified as inferred estimates. Repeated prose words are compared after removing letter scale and shear, so changing only spacing or slant cannot hide repeated constructions.
+
 ## Personal profiles
 
 ```sh
@@ -76,6 +80,11 @@ inkform profile inspect my-writing --preview build/profile.pdf
 inkform profile coverage my-writing --document document.json
 inkform profile diversity my-writing --document document.json
 inkform profile mine my-writing --characters 'nemr→' --output ./build/private-review
+inkform profile synthesize my-writing --characters 'ab1exist' --output ./build/style-review
+# Inspect the review PDF/PNGs and fill explicit decisions in review.json first.
+inkform profile review-variants ./build/style-review/proposal-profile.json \
+  --review ./build/style-review/review.json
+inkform profile preferences my-writing --corrections sampled
 inkform render document.json --profile my-writing --seed 72 --output build/personal.pdf
 
 # Preserve additional samples, orientation, hashes, and import observations.
@@ -100,7 +109,7 @@ inkform compare --reference build/baseline.pdf \
   --candidate build/personal.pdf --output build/comparison
 ```
 
-Documents contain paragraphs with typed text, inline-math, or correction runs and display-math blocks. Supported mathematics includes numbers, symbols, rows, relations, function calls, fractions, square roots, superscripts, subscripts, and limits with explicit `left`, `right`, or `both` direction. Coverage depends on the selected profile; a supported math structure does not imply its symbols have been learned. Oversized indivisible words/expressions produce an actionable overflow error. Prose wraps and paginates without compressing lines.
+Documents contain paragraphs with typed text, inline-math, or correction runs, display-math blocks, and explicit graphs. Supported mathematics includes numbers, symbols, rows, relations, function calls, fractions, square roots, superscripts, subscripts, and limits with explicit `left`, `right`, or `both` direction. Graphs preserve supplied data anchors, ticks, qualitative/quantitative coordinates, and open/filled markers while using the writer's labels and arrows. Coverage depends on the selected profile; a supported math structure does not imply its symbols have been learned. Oversized indivisible words/expressions produce an actionable overflow error. Prose wraps and paginates without compressing lines.
 
 The renderer preserves supplied content; it does not solve exercises or verify their mathematical truth. An agent performs those tasks before rendering. Missing graphs belong in `unresolved_inputs`, which is retained and reported in a partial deliverable. Literal text is preserved exactly in the semantic and text sidecars; line wrapping and whitespace are physical layout decisions. Sampled cross-outs duplicate a word before its intact version, preserving the intended wording. Explicit correction runs retain supplied deleted text in the semantic document and use the replacement in the plain-text sidecar. Set `"handwriting": {"corrections": "none"}` to disable sampled cross-outs.
 
@@ -108,12 +117,12 @@ See the [agent skill](https://github.com/user-github-me/inkform/blob/main/skills
 
 ## Current limits
 
-- Both modes use deterministic source-family rotation and bounded shape variation. Repeated-form measurements inform width and height; estimated variation remains labeled. Compatible centerline forms can interpolate; outlines retain their reviewed contours and topology. Photo-derived paths do not recover real pen pressure, timing, or order.
+- Both modes use deterministic source-family rotation and bounded shape variation. Repeated-form measurements inform width and height; estimated variation remains labeled. Reviewed synthesized variants can change construction while preserving source parent references and outline topology. Geometric checks cannot alone establish letter identity; visual review rejects misleading shapes. Photo-derived paths do not recover real pen pressure, timing, or order.
 - Cross-outs need a reviewed correction mark. Automatic placement additionally needs a correction rate counted from representative sample passages; importing photographs or isolated marks alone does not establish that habit. Corrections are text restarts, not generated wrong answers.
 - Clean outlines preserve the observed ink shape and can be the writer's default. Their thickness is baked into their geometry. Uncalibrated size changes, scripts, and scalable outline primitives are rejected.
 - Outline refinement fits continuous cubic curves with bounded movement while preserving detached marks, holes, containment, and ink area. New candidates need geometric review; old profile snapshots remain available. Changing the PNG preview DPI does not smooth the PDF's geometry.
 - Unrefined centerlines can remain angular. Reviewed consecutive word boxes can inform word-gap variation; connected cursive, learned within-word kerning, automatic page/perspective measurement, universal OCR segmentation, advanced math, and tablet capture are future work.
-- Actual PDF parsing checks physical page size, vector paths, image absence, safe bounds, every-page rasterization, and emitted glyph shapes. Same/adjacent-page duplicates and near copies fail for ordinary forms; simple punctuation has a separate limited-range report. A bounded candidate search can return `repetition_exhausted` on dense content with too little source variety. Similarity to the writer, transcription/answers, and printed readability still require review.
+- Actual PDF parsing checks physical page size, vector paths, image absence, safe bounds, every-page rasterization, emitted glyph/word constructions, and graph anchors. Same/adjacent-page duplicates and near copies fail for ordinary forms; simple punctuation has a separate limited-range report. A bounded candidate search can return `repetition_exhausted` on dense content with too little approved variety. Similarity to the writer, transcription/answers, and printed readability still require review.
 - Coverage is specific to each writer's reviewed samples. Missing forms fail coverage; Inkform never silently inserts a font.
 
 ## Contributing and license

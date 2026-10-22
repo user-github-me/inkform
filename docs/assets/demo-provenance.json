@@ -1,5 +1,5 @@
 {
-  "source": "examples/synthetic-profile.json",
+  "source": "examples/synthetic-varied-profile.json",
   "document": "examples/corrections.json",
   "synthetic": true,
   "personal_sources": 0,
@@ -9,13 +9,28 @@
   "width_profile": "constant",
   "variation": {
     "amount": 0.1,
-    "basis": "conservative_estimate"
+    "basis": "authored alternate constructions plus bounded occurrence estimates"
+  },
+  "word_pattern_audit": {
+    "status": "pass",
+    "compared_words": 8,
+    "repeated_word_count": 0
+  },
+  "comparison": {
+    "source": "direct layout of authored public reference constructions",
+    "output": "actual renderer; no private profile or input",
+    "word_pattern_status": "pass",
+    "repeated_word_comparisons": 9,
+    "repeated_word_count": 0,
+    "geometry_hash": "f3e06d73fd76e7a34966ced8cae069316f9e6e19907a85bb7313fa10fed86988"
   },
   "corrections": "explicit authored examples; no fabricated sample habit",
-  "geometry_hash": "82651ff3e9d5c4c9875457b36bbcfd26a7da83456e5058e587b4db96ada3ede3",
+  "geometry_hash": "61f0dc05b60fe8d17f67bd030a03e5e90efa37a3543ebbb018e910f1e741324f",
   "artifacts": [
     "handwriting.svg",
     "mathematics.svg",
-    "inkform-synthetic-demo.pdf"
+    "inkform-synthetic-demo.pdf",
+    "comparison-source.svg",
+    "comparison-output.svg"
   ]
 }

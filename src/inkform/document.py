@@ -138,8 +138,11 @@ def validate_document(document):
                     fail("Unsupported paragraph child.", path)
         elif block.get("type") == "display_math":
             validate_expression(block.get("expression"), path)
+        elif block.get("type") == "graph":
+            from .graphs import validate_graph
+            validate_graph(block.get("graph"), path + ".graph")
         else:
-            fail("Only paragraph and display_math blocks are supported.", path)
+            fail("Only paragraph, display_math and graph blocks are supported.", path)
     unresolved = document.get("unresolved_inputs", [])
     if not isinstance(unresolved, list):
         fail("unresolved_inputs must be a list.")
@@ -205,6 +208,9 @@ def requirements(document, *, include_deleted=False):
     for block in document["blocks"]:
         if block["type"] == "display_math":
             result.extend(math_requirements(block["expression"]))
+        elif block["type"] == "graph":
+            from .graphs import graph_requirements
+            result.extend(graph_requirements(block["graph"]))
         else:
             for run in block["children"]:
                 result.extend(math_requirements(run["expression"]) if run["type"] == "inline_math" else [("text", c) for c in clusters(run["text"]) if not c.isspace()])
@@ -233,4 +239,13 @@ def math_text(expr):
 
 
 def plain_text(document):
-    return "\n\n".join(math_text(b["expression"]) if b["type"] == "display_math" else "".join(math_text(r["expression"]) if r["type"] == "inline_math" else r["text"] for r in b["children"]) for b in document["blocks"])
+    blocks = []
+    for block in document["blocks"]:
+        if block["type"] == "graph":
+            from .graphs import graph_text
+            blocks.append(graph_text(block["graph"]))
+        elif block["type"] == "display_math":
+            blocks.append(math_text(block["expression"]))
+        else:
+            blocks.append("".join(math_text(r["expression"]) if r["type"] == "inline_math" else r["text"] for r in block["children"]))
+    return "\n\n".join(blocks)

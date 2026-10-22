@@ -84,7 +84,7 @@ def test_varying_a_graph_keeps_data_and_monotone_envelopes():
             current = end
 
 
-def test_observed_mode_does_not_invent_axis_bow_curve_deviations_or_marker_shapes():
+def test_observed_mode_transfers_reviewed_axes_and_keeps_unsupported_kinds_explicit():
     graph = spec()
     one, two = shaper(1, variation=.3), shaper(2, variation=.3)
     one.profile.update(observed_style()); two.profile.update(observed_style())
@@ -95,7 +95,10 @@ def test_observed_mode_does_not_invent_axis_bow_curve_deviations_or_marker_shape
     assert one.graphs[0]["style"]["estimated_axes"] == []
     assert one.graphs[0]["style"]["maximum_control_deviation_mm"] == 0
     assert one.graphs[0]["style"]["pen_basis"] == "reviewed_graph_ink_width"
-    assert one.graphs[0]["style"]["axis_bow_basis"] == "explicit_graph_geometry"
+    assert one.graphs[0]["style"]["axis_bow_basis"] == "reviewed_source_trace_transfer"
+    assert {item["kind"] for item in one.graphs[0]["style"]["unsupported_primitives"]} == {"tick","curve","marker"}
+    for item in a.values():
+        assert ("graph_trace" in item) == (item["graph_kind"] == "axis")
 
 
 def test_observed_graph_rejects_extra_bend_even_when_pdf_matches_manifest(tmp_path):
@@ -194,7 +197,8 @@ def test_graph_style_rejects_changed_measurements_or_unreviewed_evidence(change)
     assert error.value.code == "invalid_profile"
 
 
-def test_measured_bow_keeps_every_tick_on_the_visible_axis():
+def test_source_bow_keeps_ticks_in_contact_without_flattening_at_every_tick():
+    from inkform.graph_traces import paths_touch
     writer = shaper(variation=.1); writer.profile.update(observed_style())
     graph = spec(); graph.update(curves=[], markers=[], labels=[])
     graph["axes"][0]["ticks"][0].pop("label")
@@ -203,9 +207,15 @@ def test_measured_bow_keeps_every_tick_on_the_visible_axis():
     for item in box.items:
         if item["graph_kind"] != "axis": continue
         stroke = item["strokes"][0]
-        assert [stroke["start"]] + [segment["end"] for segment in stroke["segments"]] == item["graph_plot_anchors_mm"]
+        assert [stroke["start"], stroke["segments"][-1]["end"]] == item["graph_plot_anchors_mm"]
         assert item["pen_width_mm"] == pytest.approx(.2 * writer.size)
         assert item["source_refs"] == writer.profile["graph_style"]["source_refs"]
+    axis = next(item for item in box.items if item["graph_element_id"] == "x")
+    tick = next(item for item in box.items if item["graph_kind"] == "tick")
+    assert paths_touch(axis["strokes"][0],tick["strokes"][0])
+    # The original +1px midpoint becomes +0.3mm at 3mm x-height.
+    assert axis["strokes"][0]["segments"][0]["end"] == pytest.approx([60,78.3])
+    assert len(axis["strokes"][0]["segments"]) == 2  # Source knots, not tick intervals.
 
 
 def _marker_crossing_document():

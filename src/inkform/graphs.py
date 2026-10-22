@@ -1,9 +1,9 @@
 """Explicit graph data drawn with a writer's labels, arrows, and pen.
 
 The graph specification is the semantic authority. This module does not infer a
-function, read a graph photograph, or manufacture numerical coordinates. Small
-pen deviations are experimental estimates. Normal mode retains the explicit
-plot geometry and real writer labels/arrows without adding random curvature.
+function, read a graph photograph, or manufacture numerical coordinates.
+Reviewed graph traces supply the writer's actual departures from a baseline;
+missing kinds retain explicit geometry instead of acquiring invented wobble.
 """
 from __future__ import annotations
 
@@ -155,11 +155,12 @@ def graph_text(spec):
 
 
 def graph_axis_anchors(axis):
-    """Every tick is also an exact anchor of the visible axis path."""
-    a, b = axis["from"], axis["to"]
-    direction = [b[0] - a[0], b[1] - a[1]]
-    points = {tuple(a), tuple(b), *(tuple(tick["at"]) for tick in axis.get("ticks", []))}
-    return [list(p) for p in sorted(points, key=lambda p: sum((p[k] - a[k]) * direction[k] for k in (0, 1)))]
+    """Endpoints constrain the axis; exact tick centres are separate data.
+
+The reviewed line may meet a tick anywhere within its visible cross-stroke,
+rather than being flattened at every tick. The PDF audit verifies contact.
+"""
+    return [list(axis["from"]), list(axis["to"])]
 
 
 def _trace_deviation(trace):
@@ -212,9 +213,10 @@ def validate_graph_style(profile):
         if not _finite(xheight) or xheight <= 0 or not _finite(pen_width) or pen_width <= 0:
             fail("Graph style measurements need a positive source x-height and ink width.")
         measured_widths.append(pen_width / xheight)
-        axes = observation.get("axes")
-        if not isinstance(axes, list) or not axes:
-            fail("Graph style observations need explicit reviewed axis traces.")
+        axes = observation.get("axes", [])
+        strokes = observation.get("strokes", [])
+        if not isinstance(axes, list) or not isinstance(strokes, list) or not (axes or strokes):
+            fail("Graph style observations need explicit reviewed graph traces.")
         for axis in axes:
             orientation = axis.get("orientation") if isinstance(axis, dict) else None
             trace = axis.get("trace_px") if isinstance(axis, dict) else None
@@ -228,7 +230,26 @@ def validate_graph_style(profile):
             dx, dy = abs(trace[-1][0] - trace[0][0]), abs(trace[-1][1] - trace[0][1])
             if (orientation == "horizontal" and dx < dy) or (orientation == "vertical" and dy < dx):
                 fail("Graph axis orientation conflicts with its source trace.")
+            from .graph_traces import _chord_profile
+            try:
+                _chord_profile(trace, xheight)
+            except ValueError as exc:
+                fail(str(exc))
             measured_bows[orientation].append(_trace_deviation(trace) / xheight)
+        from .graph_traces import validate_stroke_trace
+        stroke_ids = set()
+        for stroke in strokes:
+            if not isinstance(stroke, dict):
+                fail("Reviewed graph strokes must be explicit objects.")
+            if stroke.get("stroke_id") in stroke_ids:
+                fail("Reviewed graph stroke IDs must be unique within an observation.")
+            stroke_ids.add(stroke.get("stroke_id"))
+            try:
+                validate_stroke_trace(stroke, bbox, xheight)
+            except ValueError as exc:
+                fail(str(exc))
+            if stroke["role"].startswith("axis_"):
+                measured_bows[stroke["role"].removeprefix("axis_")].append(_trace_deviation(stroke["trace_px"])/xheight)
         refs.append({"source_id": observation["source_id"], "observation_id": identity})
     declared_refs = model["source_refs"]
     if not isinstance(declared_refs, list) or any(not isinstance(r, dict) or set(r) != {"source_id", "observation_id"}
@@ -273,6 +294,8 @@ def _curve_stroke(points, interpolation, signed, amplitude):
 def graph_box(spec, shaper, token_id):
     """Make a graph Box; append a separate ledger to ``shaper.graphs``."""
     from .layout import Box, map_strokes
+    from .graph_traces import (axis_trace_path, curve_trace_path, graph_evidence, marker_trace_path,
+                               select_trace, tick_trace_path, trace_candidates, trace_reference)
     validate_graph(spec)
     width, height = spec["width_mm"], spec["height_mm"]
     padding = spec.get("padding_mm", 12)
@@ -286,6 +309,7 @@ def graph_box(spec, shaper, token_id):
     strength = 0 if observed_only else shaper.variation.strength
     amplitude = min(.14, .085 * strength)
     learned_style = validate_graph_style(shaper.profile)
+    evidence = graph_evidence(shaper.profile)
     pen = learned_style["pen_width_xheight"] * shaper.size if learned_style else shaper.profile["pen"]["width_mm"]
     style_refs = copy.deepcopy(learned_style["source_refs"]) if learned_style else []
     result = Box(width)
@@ -294,27 +318,39 @@ def graph_box(spec, shaper, token_id):
               "style": {"version": "inkform-graph-1", "pen_width_mm": pen,
                         "pen_basis": "reviewed_graph_ink_width" if learned_style else "writer_profile",
                         "source_refs": style_refs, "arrow_basis": "reviewed_writer_glyphs",
-                        "axis_bow_basis": "explicit_graph_geometry" if observed_only else "reviewed_static_graph_extent" if learned_style else "bounded_estimate",
+                        "axis_bow_basis": "reviewed_source_trace_transfer" if learned_style else "explicit_graph_geometry" if observed_only else "bounded_estimate",
                         "axis_bow_xheight": copy.deepcopy(learned_style["axis_bow_xheight"]) if learned_style else None,
-                        "estimated_axes": [] if observed_only else ["bow_direction", "within_extent_path", "curve_deviation", "marker_shape"],
+                        "estimated_axes": [],
                         "mode": shaper.variation.mode,
-                        "curve_deviation_basis": "none" if observed_only else "bounded_estimate", "maximum_control_deviation_mm": amplitude,
-                        "source_fidelity": "writer labels, original arrow shapes, measured pen width; plot curves follow the explicit graph specification",
+                        "curve_deviation_basis": "reviewed_source_trace_transfer" if trace_candidates(evidence, "curve") else "explicit_graph_geometry" if observed_only else "bounded_estimate",
+                        "maximum_control_deviation_mm": amplitude,
+                        "reviewed_transfer_limits_mm": {"axis":1.2,"axis_with_ticks":.45,"curve":.45,"tick":.25},
+                        "source_evidence": evidence, "unsupported_primitives": [],
+                        "source_fidelity": "reviewed source trace knots and polarity where available; explicit graph geometry for unsupported stroke kinds",
+                        "axis_tick_contact": "exact data centres; reviewed axis may cross within 0.45 mm of centre",
                         "data_anchors": "preserved_exactly", "curve_interpolation": "explicit_specification"}}
 
     def signed(identity, domain):
         return 2 * stable_value(shaper.seed, identity, domain) - 1
 
-    def primitive(kind, name, strokes, data_anchors, *, filled=False):
+    def primitive(kind, name, strokes, data_anchors, *, filled=False, candidate=None):
         identity = f"{token_id}.{kind}.{name}"
         geometry = {"strokes": strokes, "representation": "clean_outline" if filled else "centerline", "pen_width_mm": pen}
         item = {**geometry, "token_id": identity, "glyph_id": "graph." + kind,
                 "role": "graph." + kind, "text": f"graph-{kind}:{name}", "semantic": False,
                 "content_kind": "graph_primitive", "graph_id": token_id, "graph_kind": kind, "graph_element_id": name,
                 "graph_data_anchors": copy.deepcopy(data_anchors), "graph_plot_anchors_mm": [mapped(p) for p in data_anchors],
-                "source_refs": copy.deepcopy(style_refs), "source_geometry_hash": hashlib.sha256(json.dumps(geometry, sort_keys=True).encode()).hexdigest(),
-                "variation": {"basis": "explicit_graph_geometry" if observed_only else "bounded_estimate",
+                "source_refs": [{"source_id": candidate["source_id"], "observation_id": candidate["observation_id"]}] if candidate else [],
+                "source_geometry_hash": hashlib.sha256(json.dumps(geometry, sort_keys=True).encode()).hexdigest(),
+                "variation": {"basis": "reviewed_source_trace_transfer" if candidate else "explicit_graph_geometry" if observed_only else "bounded_estimate",
                               "mode": shaper.variation.mode, "amount": shaper.variation.amount}}
+        if candidate:
+            item["graph_trace"] = trace_reference(candidate, shaper.size)
+        else:
+            ledger["style"]["unsupported_primitives"].append({"token_id": identity, "kind": kind,
+                "basis": item["variation"]["basis"], "reason": "no reviewed source stroke of the corresponding kind"})
+            if not observed_only and kind not in ledger["style"]["estimated_axes"]:
+                ledger["style"]["estimated_axes"].append(kind)
         result.items.append(item); ledger["primitive_token_ids"].append(identity)
         return item
 
@@ -332,21 +368,17 @@ def graph_box(spec, shaper, token_id):
         a, b = mapped(axis["from"]), mapped(axis["to"])
         dx, dy = b[0] - a[0], b[1] - a[1]
         length = math.hypot(dx, dy)
-        # Endpoints and every supplied tick remain on the visible axis. A
-        # source-observed extent controls the bow; its new direction/path is
-        # explicitly estimated, never recovered pen dynamics.
         anchors = graph_axis_anchors(axis); plot_anchors = [mapped(p) for p in anchors]
-        observed_bow = ((abs(dx) * learned_style["axis_bow_xheight"]["horizontal"]
-                         + abs(dy) * learned_style["axis_bow_xheight"]["vertical"])
-                        / (abs(dx) + abs(dy)) * shaper.size) if learned_style else amplitude / 2
-        segments = []
-        for index, (start, end) in enumerate(zip(plot_anchors, plot_anchors[1:])):
-            sx, sy = end[0] - start[0], end[1] - start[1]; span = math.hypot(sx, sy)
-            bow = min(2 * observed_bow * min(1, strength), span * .055) * signed(axis["id"], f"{token_id}-axis-{index}")
-            c1 = [start[0] + sx / 3 - sy / span * bow, start[1] + sy / 3 + sx / span * bow]
-            c2 = [start[0] + 2 * sx / 3 - sy / span * bow * .6, start[1] + 2 * sy / 3 + sx / span * bow * .6]
-            segments.append({"type": "cubic", "control1": c1, "control2": c2, "end": end})
-        primitive("axis", axis["id"], [{"start": a, "segments": segments, "closed": False}], anchors)
+        role = "axis_horizontal" if abs(dx) >= abs(dy) else "axis_vertical"
+        candidate = select_trace(evidence, role, shaper.seed, f"{token_id}.axis.{axis['id']}")
+        if candidate:
+            stroke = axis_trace_path(plot_anchors, candidate, shaper.size, has_ticks=bool(axis.get("ticks")))
+        else:
+            bow = min(amplitude, length*.055)*signed(axis["id"], token_id+"-axis")
+            stroke = {"start": a, "segments": [{"type": "cubic",
+                "control1": [a[0]+dx/3-dy/length*bow,a[1]+dy/3+dx/length*bow],
+                "control2": [a[0]+2*dx/3-dy/length*bow*.6,a[1]+2*dy/3+dx/length*bow*.6], "end": b}], "closed": False}
+        primitive("axis", axis["id"], [stroke], anchors, candidate=candidate)
         if axis.get("arrow", True):
             arrow = shaper.glyph("→", "math.operator", f"{token_id}.arrow.{axis['id']}")
             bounds = arrow.bounds
@@ -365,14 +397,18 @@ def graph_box(spec, shaper, token_id):
         for tick in axis.get("ticks", []):
             x, y = mapped(tick["at"])
             half = .8 + .10 * strength * signed(tick["id"], token_id + "-tick")
-            primitive("tick", tick["id"], [{"start": [x - nx * half, y - ny * half], "segments": [{"type": "line", "end": [x + nx * half, y + ny * half]}], "closed": False}], [tick["at"]])
+            candidate = select_trace(evidence, "tick", shaper.seed, f"{token_id}.tick.{tick['id']}")
+            stroke = tick_trace_path([x,y], [nx,ny], candidate, shaper.size) if candidate else {
+                "start": [x-nx*half,y-ny*half], "segments": [{"type": "line", "end": [x+nx*half,y+ny*half]}], "closed": False}
+            primitive("tick", tick["id"], [stroke], [tick["at"]], candidate=candidate)
             if "label" in tick:
                 label(tick["label"], tick["at"], tick.get("offset_mm", [-1, 5]), f"{token_id}.tick-label.{tick['id']}")
     for curve in spec.get("curves", []):
         points = [mapped(p) for p in curve["points"]]
-        stroke = _curve_stroke(points, curve.get("interpolation", "linear"),
+        candidate = select_trace(evidence, "curve", shaper.seed, f"{token_id}.curve.{curve['id']}")
+        stroke = curve_trace_path(points, curve.get("interpolation", "linear"), candidate, shaper.size) if candidate else _curve_stroke(points, curve.get("interpolation", "linear"),
                                lambda i: signed(curve["id"], f"{token_id}-curve-{i}"), amplitude)
-        primitive("curve", curve["id"], [stroke], curve["points"])
+        primitive("curve", curve["id"], [stroke], curve["points"], candidate=candidate)
     for marker in spec.get("markers", []):
         x, y = mapped(marker["at"]); radius = marker.get("radius_mm", .8)
         # Symmetric opposing handles keep the actual marker centre exact.
@@ -384,7 +420,13 @@ def graph_box(spec, shaper, token_id):
             {"type": "cubic", "control1": [x - k * rx, y + ry], "control2": [x - rx, y + k * ry], "end": [x - rx, y]},
             {"type": "cubic", "control1": [x - rx, y - k * ry], "control2": [x - k * rx, y - ry], "end": [x, y - ry]},
             {"type": "cubic", "control1": [x + k * rx, y - ry], "control2": [x + rx, y - k * ry], "end": [x + rx, y]}], "closed": True}
-        item = primitive("marker", marker["id"], [stroke], [marker["at"]], filled=marker["style"] == "filled")
+        candidate = select_trace(evidence, "marker_"+marker["style"], shaper.seed, f"{token_id}.marker.{marker['id']}")
+        if candidate:
+            stroke = marker_trace_path([x,y],radius,candidate)
+            # Source contours need enough interior after normalization for the
+            # actual pen, just as an explicit ellipse does.
+            rx = ry = min(math.dist(p,[x,y]) for p in [stroke["start"]]+[s["end"] for s in stroke["segments"]])
+        item = primitive("marker", marker["id"], [stroke], [marker["at"]], filled=marker["style"] == "filled", candidate=candidate)
         if marker["style"] == "open":
             if min(rx, ry) - pen / 2 < .15:
                 raise InkformError("graph_marker_too_small", "An open graph marker needs a visible paper interior; increase its radius for this pen width.",

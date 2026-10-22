@@ -453,7 +453,10 @@ def _emitted_glyphs(reader, manifest):
                                    and is_graph_primitive(expected_item)
                                    and op == b"B*" and not group and not state["stroke_white"]
                                    and len(paths) == 1 and paths[0].get("closed")
-                                   and len(paths[0]["segments"]) == 4
+                                   and (len(paths[0]["segments"]) == 4 or (
+                                       expected_item.get("graph_trace", {}).get("version") == "reviewed-graph-trace-1"
+                                       and expected_item.get("graph_trace", {}).get("role") == "marker_open"
+                                       and 3 <= len(paths[0]["segments"]) <= 2048))
                                    and all(segment["type"] == "cubic" for segment in paths[0]["segments"]))
                         if not allowed:
                             raise ValueError("White fill is only allowed as the single simultaneous fill/stroke of an explicit open graph marker")
@@ -492,7 +495,7 @@ def _emitted_glyphs(reader, manifest):
                                "text": expected_item.get("text"), "page": page_index, "_ink_paints": paints,
                                **({"paper_knockout": "open_graph_marker"} if knockout else {}),
                                **{key: expected_item[key] for key in ("word_id", "word_position", "semantic", "content_kind",
-                                   "graph_id", "graph_kind", "graph_element_id", "graph_data_anchors", "graph_plot_anchors_mm") if key in expected_item},
+                                   "graph_id", "graph_kind", "graph_element_id", "graph_data_anchors", "graph_plot_anchors_mm", "graph_trace", "source_refs") if key in expected_item},
                                **({"nominal_size_mm": expected_item["nominal_size_mm"]} if "nominal_size_mm" in expected_item else {})})
     if not marked_pages:
         if contract is not None:
@@ -618,7 +621,7 @@ def _check_content_accounting(manifest: dict, instances: list, report: dict) -> 
 
 def _check_correction_accounting(manifest: dict, instances: list, report: dict) -> None:
     """Every extra ink token must belong to a declared, internally exact edit."""
-    from .document import clusters
+    from .document import clusters, validate_expression, math_text, math_ink_order, math_restart_fragments
 
     auxiliary = [item for item in instances if item.get("semantic", True) is False and not is_graph_primitive(item)]
     records = manifest.get("corrections", [])
@@ -641,8 +644,28 @@ def _check_correction_accounting(manifest: dict, instances: list, report: dict) 
                 raise ValueError("unsupported correction kind")
             if not isinstance(record["deleted"], str) or not record["deleted"].strip() or not isinstance(record["replacement"], str):
                 raise ValueError("corrections need deleted text and a replacement string")
-            if record["kind"] == "sampled_restart" and record["deleted"] != record["replacement"]:
-                raise ValueError("sampled restarts must repeat the intended word")
+            content_type = record.get("content_type", "text")
+            if content_type not in {"text", "math"}:
+                raise ValueError("correction content must be typed text or math")
+            if content_type == "math":
+                for part in ("deleted", "replacement"):
+                    expr = record[part + "_expression"]
+                    validate_expression(expr)
+                    if record[part] != math_text(expr):
+                        raise ValueError("math correction text must describe its exact expression")
+            if record["kind"] == "sampled_restart":
+                if content_type == "math":
+                    if (record.get("attempt_basis") != "estimated_partial_fragment" or record.get("attempt_observed") is not False
+                            or record["deleted_expression"] not in math_restart_fragments(record["replacement_expression"])):
+                        raise ValueError("sampled math restarts must be declared estimated proper fragments of the intended expression")
+                elif record.get("attempt_basis") == "estimated_partial_word_restart":
+                    if (record.get("attempt_observed") is not False or record["deleted"] == record["replacement"]
+                            or not record["replacement"].startswith(record["deleted"])
+                            or not any(char.isalpha() for char in record["deleted"])):
+                        raise ValueError("sampled partial restarts must be declared estimates and proper prefixes of the intended word")
+                elif record["deleted"] != record["replacement"]:
+                    # Historical whole-word restart exports remain checkable.
+                    raise ValueError("sampled restarts need a declared partial attempt or the historical repeated word")
             for part in ("deleted", "mark", "replacement"):
                 tokens = record[part + "_token_ids"]
                 if not isinstance(tokens, list) or not all(isinstance(t, str) for t in tokens):
@@ -661,14 +684,15 @@ def _check_correction_accounting(manifest: dict, instances: list, report: dict) 
                         or item["glyph_id"] != record["glyph_id"] or item.get("source_refs") != record["source_refs"] for item in items):
                         raise ValueError("each correction needs its declared sampled mark")
                 else:
-                    expected = [c for c in clusters(record["deleted" if part == "deleted" else "replacement"]) if not c.isspace()]
-                    if [item["text"] for item in items] != expected or any(item["role"] != "text" for item in items):
+                    expected = (math_ink_order(record[part + "_expression"]) if content_type == "math" else
+                                [("text", c) for c in clusters(record[part]) if not c.isspace()])
+                    if [(item["role"], item["text"]) for item in items] != expected:
                         raise ValueError("correction text does not match its visible glyphs")
         if declared_auxiliary != {item["token_id"] for item in auxiliary}:
             raise ValueError("undeclared or missing nonsemantic ink")
         if {item["token_id"] for item in instances if "correction_id" in item} != used_tokens:
             raise ValueError("undeclared correction references")
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError, InkformError) as exc:
         _issue(report, "invalid_correction_inventory", "Could not account for correction ink.", reason=str(exc))
 
 
@@ -680,7 +704,9 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
     an exact primitive inventory, data mapping, anchors and marker semantics
     must agree. The emitted pass checks actual PDF path coordinates as well.
     """
-    from .graphs import _curve_stroke, graph_axis_anchors, graph_requirements, validate_graph
+    from .graphs import _curve_stroke, graph_axis_anchors, graph_requirements, validate_graph, validate_graph_style
+    from .graph_traces import (axis_trace_path, curve_trace_path, marker_trace_path, path_distance,
+                               path_samples, paths_touch, resolve_trace, tick_trace_path, trace_candidates)
     records = manifest.get("graphs", [])
     primitives = [item for item in instances if is_graph_primitive(item)]
     attributed = [item for item in instances if "graph_id" in item or item.get("content_kind") == "graph_primitive"]
@@ -704,6 +730,12 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                 raise ValueError("graph IDs must be nonempty and unique")
             graph_ids.add(identity)
             validate_graph(spec)
+            style = record.get("style", {})
+            evidence = style.get("source_evidence")
+            if evidence is not None:
+                validate_graph_style(evidence)
+                if style.get("source_refs") != evidence["graph_style"]["source_refs"]:
+                    raise ValueError("graph trace ledger must retain its exact reviewed source references")
             primitive_ids, label_ids, arrow_ids = (record[key] for key in ("primitive_token_ids", "label_token_ids", "arrow_token_ids"))
             for tokens in (primitive_ids, label_ids, arrow_ids):
                 if not isinstance(tokens, list) or any(not isinstance(token, str) for token in tokens):
@@ -723,11 +755,12 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
             actual_symbols = Counter((by_token[token]["role"], by_token[token]["text"]) for token in label_ids+arrow_ids)
             if actual_symbols != Counter(graph_requirements(spec)):
                 raise ValueError("graph labels or sampled arrows differ from their explicit specification")
-            expected = {}
+            expected, tick_axes, drawn_paths = {}, {}, {}
             for axis in spec.get("axes", []):
                 expected[f"{identity}.axis.{axis['id']}"] = ("axis", graph_axis_anchors(axis), axis)
                 for tick in axis.get("ticks", []):
                     expected[f"{identity}.tick.{tick['id']}"] = ("tick", [tick["at"]], tick)
+                    tick_axes[f"{identity}.tick.{tick['id']}"] = axis
             for curve in spec.get("curves", []):
                 expected[f"{identity}.curve.{curve['id']}"] = ("curve", curve["points"], curve)
             for marker in spec.get("markers", []):
@@ -761,7 +794,39 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                 if len(paths) != 1:
                     raise ValueError("each graph primitive must have one explicit path")
                 path = paths[0]
-                if kind in {"axis", "curve"}:
+                drawn_paths[token] = path
+                reference = item.get("graph_trace")
+                if reference is not None:
+                    candidate, size = resolve_trace(evidence,reference)
+                    if abs(size-manifest["page"]["body_x_height_mm"]) > 1e-8:
+                        raise ValueError("graph source transfer scale differs from the declared writing size")
+                    if item.get("source_refs") != [{"source_id": candidate["source_id"], "observation_id": candidate["observation_id"]}]:
+                        raise ValueError("graph primitive source reference differs from its reviewed trace")
+                    pen_width = paints[0].get("pen_width_mm",0) if paints else item["pen_width_mm"]
+                    if kind != "marker" or element["style"] != "filled":
+                        if abs(pen_width-evidence["graph_style"]["pen_width_xheight"]*size) > .002:
+                            raise ValueError("graph pen differs from its reviewed source measurement")
+                    if kind == "axis":
+                        a,b=expected_anchors
+                        role = "axis_horizontal" if abs(b[0]-a[0]) >= abs(b[1]-a[1]) else "axis_vertical"
+                        canonical = axis_trace_path(expected_anchors,candidate,size,has_ticks=bool(element.get("ticks")))
+                    elif kind == "curve":
+                        role = "curve"
+                        canonical = curve_trace_path(expected_anchors,element.get("interpolation","linear"),candidate,size)
+                    elif kind == "tick":
+                        role = "tick"
+                        axis = tick_axes[token]; a,b = mapped(axis["from"]),mapped(axis["to"])
+                        dx,dy=b[0]-a[0],b[1]-a[1]; length=math.hypot(dx,dy)
+                        canonical = tick_trace_path(expected_anchors[0],[-dy/length,dx/length],candidate,size)
+                    else:
+                        role = "marker_"+element["style"]
+                        canonical = marker_trace_path(expected_anchors[0],element.get("radius_mm",.8),candidate)
+                    if candidate["role"] != role or path_distance(path,canonical) > .002:
+                        raise ValueError("drawn graph geometry differs from its reviewed source trace transfer")
+                    # All source paths are reconstructed at the semantic
+                    # anchors above; additional knots are evidence, not data.
+                    actual = expected_anchors
+                elif kind in {"axis", "curve"}:
                     actual = [path["start"]]+[segment["end"] for segment in path["segments"]]
                     if observed_only:
                         interpolation = element.get("interpolation", "linear") if kind == "curve" else "linear"
@@ -775,27 +840,38 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                     if len(path["segments"]) != 1:
                         raise ValueError("graph tick must have one span")
                     actual = [[(a+b)/2 for a,b in zip(path["start"], path["segments"][0]["end"])]]
-                else:
-                    if not path.get("closed") or len(path["segments"]) != 4:
-                        raise ValueError("graph marker must be a closed four-span outline")
-                    actual = [[(a+b)/2 for a,b in zip(path["start"], path["segments"][1]["end"])]]
+                if kind == "marker":
+                    if reference is not None:
+                        samples = path_samples(path)
+                        if not path.get("closed"):
+                            raise ValueError("reviewed graph marker must remain closed")
+                        radius = element.get("radius_mm",.8)
+                        radii = [math.dist(point,expected_anchors[0]) for point in samples]
+                        if max(radii) > radius+.002:
+                            raise ValueError("reviewed graph marker radii exceed their declared bounded size")
+                        rx=ry=min(radii)
+                    else:
+                        if not path.get("closed") or len(path["segments"]) != 4:
+                            raise ValueError("graph marker must be a closed four-span outline")
+                        actual = [[(a+b)/2 for a,b in zip(path["start"], path["segments"][1]["end"])]]
                     representation = paints[0]["representation"] if paints else item["representation"]
                     if (representation == "clean_outline") != (element["style"] == "filled"):
                         raise ValueError("open and filled graph marker semantics changed")
                     cx, cy = expected_anchors[0]
-                    rx, ry = path["start"][0]-cx, path["segments"][0]["end"][1]-cy
+                    if reference is None:
+                        rx, ry = path["start"][0]-cx, path["segments"][0]["end"][1]-cy
                     amount = manifest.get("variation", {}).get("amount", .1)
                     if not isinstance(amount, (int, float)) or isinstance(amount, bool) or not math.isfinite(amount) or not 0 <= amount <= .3:
                         raise ValueError("graph marker needs a valid bounded variation amount")
                     spread, radius = (0 if observed_only else .025*min(amount/.1, 3)), element.get("radius_mm", .8)
-                    if not all(radius*(1-spread)-.002 <= value <= radius*(1+spread)+.002 for value in (rx, ry)):
+                    if reference is None and not all(radius*(1-spread)-.002 <= value <= radius*(1+spread)+.002 for value in (rx, ry)):
                         raise ValueError("graph marker radii exceed their declared bounded size")
                     k = .5522847498307936
                     canonical = [([cx+rx, cy+k*ry], [cx+k*rx, cy+ry], [cx, cy+ry]),
                                  ([cx-k*rx, cy+ry], [cx-rx, cy+k*ry], [cx-rx, cy]),
                                  ([cx-rx, cy-k*ry], [cx-k*rx, cy-ry], [cx, cy-ry]),
                                  ([cx+k*rx, cy-ry], [cx+rx, cy-k*ry], [cx+rx, cy])]
-                    if any(segment["type"] != "cubic" or any(math.dist(segment[key], value) > .002 for key, value in zip(("control1", "control2", "end"), controls))
+                    if reference is None and any(segment["type"] != "cubic" or any(math.dist(segment[key], value) > .002 for key, value in zip(("control1", "control2", "end"), controls))
                            for segment, controls in zip(path["segments"], canonical)):
                         raise ValueError("graph marker must keep its declared bounded ellipse rather than masking arbitrary ink")
                     open_marker = element["style"] == "open"
@@ -810,6 +886,17 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                             raise ValueError("data strokes and arrows must be painted before open graph markers")
                 if len(actual) != len(expected_anchors) or any(math.dist(a,b) > .002 for a,b in zip(actual, expected_anchors)):
                     raise ValueError("drawn graph endpoints/centres moved away from explicit data anchors")
+                if reference is None and evidence is not None:
+                    if kind == "axis":
+                        a,b=expected_anchors
+                        role="axis_horizontal" if abs(b[0]-a[0]) >= abs(b[1]-a[1]) else "axis_vertical"
+                    else:
+                        role="marker_"+element["style"] if kind == "marker" else kind
+                    if trace_candidates(evidence,role):
+                        raise ValueError("available reviewed graph stroke was replaced by unsupported geometry")
+            for tick_token,axis in tick_axes.items():
+                if not paths_touch(drawn_paths[f"{identity}.axis.{axis['id']}"],drawn_paths[tick_token]):
+                    raise ValueError("reviewed axis must intersect each visible tick at its declared data position")
         if declared_primitives != {item["token_id"] for item in primitives}:
             raise ValueError("undeclared graph primitive ink")
         if used != {item["token_id"] for item in attributed}:

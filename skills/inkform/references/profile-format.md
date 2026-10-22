@@ -16,6 +16,25 @@ Initial scale and pen values are calibration choices, not measurements establish
 
 ## Variation and correction evidence
 
+Optional `source_context` on a glyph or its referenced observation records
+`kind` (`body`, `capital`, `baseline_digit`, `superscript`, or `subscript`),
+`review_status`, and `reviewed_by`. It requires actual reviewed source context;
+small geometry alone does not establish that an occurrence was an exponent.
+Object annotations bind to an identified reviewed observation and its matching
+stored source hash; a glyph annotation must retain that observation reference.
+Older string-valued `source_context` notes remain valid, but do not establish
+reviewed context categories.
+For script forms, `normalization: context_xheight` means the stored geometry
+uses the script's own x-height and can use normal script layout scaling.
+`body_xheight` or unknown script normalization needs calibration before use,
+otherwise the engine would shrink an already-small source form again.
+
+Selection first favors compatible source context and size, then balances
+genuine variants in that pool. When context is unannotated, size comparisons
+against the writer's other capitals or digits are reported as estimates.
+Sparse coverage remains a disclosed fallback; shape distortion does not repair
+a mislabeled or poorly calibrated donor.
+
 `variation.mode` is `observed` by default, including when absent from an older profile. It selects reviewed source forms, excludes `derivation` records, and preserves their internal geometry. Uniform scale and layout placement remain available; interpolation, shape warps, and invented letter or arrow curves are disabled. `experimental` explicitly enables the earlier deformation and derived-form behavior. Save the choice with `profile preferences my-writing --variation-mode observed|experimental`. The normal workflow uses observed mode.
 
 `variation.learned` records the model with `version: "inkform-variation-1"` and `basis: "reviewed_samples"`. Its `by_glyph` rows contain `role`, `text`, relative `width` and `height` amplitudes, `source_count`, `glyph_ids`, and `observation_ids`. A row needs at least two distinct reviewed source occurrences of that form; repeated representations or aliases do not count twice. Width and height amplitudes are bounded at 0.15 and 0.12. Missing evidence stays a reported gap; observed rendering does not invent an internal shape distribution.
@@ -49,10 +68,15 @@ hash, reviewed actor/status, crop `bbox_xywh`, `xheight_px`, `pen_width_px`, and
 `axes` with `orientation` and absolute source `trace_px` points. Validation
 recomputes perpendicular deviation from each endpoint chord and aggregates
 the reviewed measurements. Record static ink width only, not inferred pressure.
-Observed graph rendering uses the reviewed pen width and explicit graph
-geometry without added axis bow. Experimental rendering can use the reviewed
-bow extent, with new direction/path choices still identified as estimates.
-Both modes keep the supplied data anchors fixed.
+Optional `strokes` hold reviewed `stroke_id`, `role` (`curve`, `tick`,
+`marker_open`, or `marker_filled`), source `trace_px`, and `closed`. Curves
+retain `anchors_px` for their underlying shape; markers retain `center_px`.
+Observed rendering transfers the measured residual shape of axes/curves and
+the actual tick/marker contour. It keeps curve data anchors and axis endpoints
+exact; ticks keep their data centers and must visibly intersect their axis.
+The manifest carries the reviewed evidence so actual-PDF checks can rebuild
+the expected paths. Missing trace roles use declared geometry and are reported
+as fallbacks. Static trace transfer does not recover pen movement.
 
 To retain an actual mode preference, create an immutable version. Omit the feedback field until feedback exists; record the user's words accurately rather than inventing approval. This example saves only the mode:
 

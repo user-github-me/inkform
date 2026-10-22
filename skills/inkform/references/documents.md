@@ -49,16 +49,16 @@ The document setting overrides the profile's saved correction preference;
 without either, `sampled` is the default. Save a writer's choice with
 `profile preferences WRITER --corrections sampled` or `--corrections none`.
 A profile with a reviewed nonzero correction habit and
-accepted correction marks can add crossed-out restarts of ordinary text words,
-then write those same words intact. These physical restarts leave the input
+accepted correction marks can add crossed-out partial words or math fragments,
+then write the intended content intact. These physical restarts leave the input
 document and intended plain text unchanged. The rate comes from representative
 sample passages; absent habit evidence produces none. Use `"corrections":
 "none"` to suppress sampled restarts. This setting does not erase explicit
 correction runs supplied as content.
 
-Sampling applies to ordinary text words, not math nodes. It is deterministic
+Sampling applies to words and inline/display math nodes. It is deterministic
 for a saved seed, not a promise of an exact number of marks on each short page.
-A sampled restart is skipped when its doubled word would exceed the printable
+A sampled restart is skipped when its draft and replacement would exceed the printable
 width.
 
 ## Mathematics
@@ -111,15 +111,43 @@ Use `coordinate_kind: qualitative` when the source establishes only a shape,
 not numerical values. Keep those placement coordinates out of asserted answers.
 Labels use the writer's text forms; axes use their reviewed right-arrow forms
 rotated to the declared direction. Their heads retain normal writing scale.
-The profile's source-reviewed `graph_style` supplies static pen width. In
-observed mode, axes and curves follow the explicit graph specification without
-added bow, wobble, or marker deformation. A traced curve needs enough supplied
-points to preserve its visible shape. Experimental mode can use reviewed axis
-bow extents and estimated curve deviations; those are not source-recovered pen
-motion. The actual PDF check verifies anchors, marker fill, and every visible
-graph path. Repeated geometric data are legitimate; graph labels and arrows
+The profile's source-reviewed `graph_style` supplies static pen width and
+reviewed graph traces. Observed mode transfers actual source deviations along
+axes and curves, plus reviewed tick and marker contours. Curve data anchors
+and axis endpoints stay exact. Tick centers stay at their data positions; the
+axis must intersect each tick, with at most 0.45 mm displacement at that point.
+A source trace's direction and local changes are retained rather than replaced
+with generated jitter. Missing trace roles fall back to explicit geometry and
+are reported. Trace transfer is an adaptation of static ink, not recovered pen
+motion. Actual-PDF checks rebuild expected paths from the reviewed evidence
+and verify anchors, marker fill, and every visible graph path. Repeated geometric data are legitimate; graph labels and arrows
 still undergo handwriting audits. Report source limitations instead of adding
 generic irregularity to make the graph look handwritten.
 
 Do not infer an equation, redraw a missing problem graph, change an open point
 to a filled point, or shift data to make the picture appear more handwritten.
+
+## Mathematical corrections
+
+A paragraph can contain a `math_correction` run with `id`,
+`deleted_expression`, and `expression` (the intact replacement). Both use the
+ordinary math AST. A `display_math` block can carry `deleted_expression` beside
+its final `expression` for the same visible effect.
+
+```json
+{"id":"revised-answer","type":"math_correction",
+ "deleted_expression":{"type":"number","value":"12"},
+ "expression":{"type":"number","value":"16"}}
+```
+
+Deleted expressions require reviewed forms in their mathematical roles. Only
+the final expression enters the intended plain-text answer; the full semantic
+document and correction ledger retain the visible deletion. Automatic sampled
+corrections use incomplete prefixes or proper expression fragments at the
+profile's correction rate. These draft choices are marked as estimates, not
+recovered mistakes. A single indivisible glyph has no automatic partial attempt;
+it can still be explicitly crossed out. Graph-element deletions are not yet
+supported.
+
+Expandable roots join the reviewed hook and roof at their actual pen endpoints.
+The bar spans the radicand with clearance, including nested fractions and roots.

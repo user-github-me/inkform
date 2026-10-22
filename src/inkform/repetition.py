@@ -173,13 +173,11 @@ def _limited(item, paths, mask, grid_mm):
     return min(spans) <= max(.5, max(spans)*.22)
 
 
-def shape_descriptor(item: dict, *, grid_mm: float = GRID_MM) -> ShapeDescriptor:
-    """Describe rendered paths at physical scale, independently of metadata IDs.
+def raster_ink(item: dict, *, grid_mm: float = GRID_MM, normalize: bool = True):
+    """Rasterize all painted ink, retaining holes, dots and stroke widths.
 
-    ``nominal_size_mm`` is optional. When present, intended script/body scaling
-    is normalized to a 3 mm nominal size, preserving relative width/height
-    differences. Old manifests remain measurable in their native millimetres.
-    Placement, glyph IDs, seeds and source references never affect the metric.
+    The origin is relative to the geometry centre, so translated copies have
+    identical masks. Physical placement callers use ``normalize=False``.
     """
     if not _finite(grid_mm) or not .005 <= grid_mm <= .1:
         raise ValueError("Repetition grid must be between 0.005 and 0.1 mm")
@@ -197,7 +195,7 @@ def shape_descriptor(item: dict, *, grid_mm: float = GRID_MM) -> ShapeDescriptor
     nominal = item.get("nominal_size_mm")
     if nominal is not None and (not _finite(nominal) or nominal <= 0):
         raise ValueError("Invalid nominal writing size in repetition audit")
-    factor = 3. / nominal if nominal else 1.
+    factor = 3. / nominal if normalize and nominal else 1.
     from .profiles import geometry_bounds
     left, top, right, bottom = geometry_bounds(strokes)
     if not all(_finite(v) for v in (left, top, right, bottom)):
@@ -274,6 +272,23 @@ def shape_descriptor(item: dict, *, grid_mm: float = GRID_MM) -> ShapeDescriptor
             mask |= np.asarray(image, dtype=bool)
     if not mask.any():
         raise ValueError("Repetition descriptor contains no visible ink")
+    return {"mask": mask, "origin_mm": origin, "center_mm": center, "paths": paths,
+            "factor": factor, "fingerprints": fingerprints, "nominal": nominal,
+            "bounds_mm": (left, top, right, bottom)}
+
+
+def shape_descriptor(item: dict, *, grid_mm: float = GRID_MM) -> ShapeDescriptor:
+    """Describe rendered paths at physical scale, independently of metadata IDs.
+
+    ``nominal_size_mm`` is optional. When present, intended script/body scaling
+    is normalized to a 3 mm nominal size, preserving relative width/height
+    differences. Old manifests remain measurable in their native millimetres.
+    Placement, glyph IDs, seeds and source references never affect the metric.
+    """
+    raster = raster_ink(item, grid_mm=grid_mm)
+    mask, origin, paths = raster["mask"], raster["origin_mm"], raster["paths"]
+    factor, fingerprints, nominal = raster["factor"], raster["fingerprints"], raster["nominal"]
+    left, top, right, bottom = raster["bounds_mm"]
     edge = mask & ~binary_erosion(mask)
     yy, xx = np.nonzero(edge)
     boundary = np.column_stack((xx*grid_mm + origin[0], yy*grid_mm + origin[1]))
@@ -319,7 +334,7 @@ def assess_pair(first, second, *, threshold_mm=NEAR_THRESHOLD_MM) -> dict:
     limited = first.limited and second.limited
     category = "exact" if exact else "limited" if limited and distance < threshold_mm else "near" if distance < threshold_mm else "distinct"
     return {"category": category, "distance_mm": round(distance, 7), "threshold_mm": threshold_mm,
-            "limited_shape_space": limited, "scale_basis": first.scale_basis if first.scale_basis == second.scale_basis else "mixed"}
+            "limited_shape_space": bool(limited), "scale_basis": first.scale_basis if first.scale_basis == second.scale_basis else "mixed"}
 
 
 class RepetitionIndex:

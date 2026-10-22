@@ -37,7 +37,8 @@ def profile_diversity(profile: dict, document: dict | None = None, mode: str | N
     observations = {o['observation_id']: o for o in profile.get('observations', [])}
     groups = defaultdict(list)
     for glyph in accepted_glyphs(profile):
-        if glyph['representation'] == representation or (glyph['role'] == 'mark.correction' and glyph['representation'] == 'centerline'):
+        if glyph['representation'] == representation or (glyph['representation'] == 'centerline' and (
+                glyph['role'] == 'mark.correction' or (glyph['role'] == 'math.operator' and glyph['text'] in {'−', '√'}))):
             groups[(glyph['role'], glyph['text'])].append(glyph)
     needed = Counter(visible_requirements(document)) if document is not None else Counter()
     records, requests = [], []

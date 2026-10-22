@@ -70,7 +70,11 @@ def draw_instance(c, item, height):
         if (item["paper_knockout"] != "open_graph_marker" or item.get("role") != "graph.marker"
                 or item.get("content_kind") != "graph_primitive" or item.get("semantic") is not False
                 or item.get("representation") != "centerline" or len(paths) != 1
-                or not paths[0].get("closed") or len(paths[0]["segments"]) != 4
+                or not paths[0].get("closed")
+                or (len(paths[0]["segments"]) != 4 and not (
+                    item.get("graph_trace", {}).get("version") == "reviewed-graph-trace-1"
+                    and item.get("graph_trace", {}).get("role") == "marker_open"
+                    and 3 <= len(paths[0]["segments"]) <= 2048))
                 or any(segment["type"] != "cubic" for segment in paths[0]["segments"])):
             raise InkformError("invalid_paper_knockout", "Paper knockouts are reserved for explicit closed open-graph markers.")
         # A single B* paints the paper interior before the same path's pen

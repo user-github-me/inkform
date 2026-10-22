@@ -10,9 +10,12 @@ from dataclasses import dataclass, field
 
 import regex
 
-from .document import clusters, requirements, validate_document, visible_requirements
+from .document import (clusters, requirements, validate_document, visible_requirements,
+                       math_text, math_restart_fragments)
 from .errors import InkformError
 from .profiles import accepted_glyphs, coverage, geometry_bounds, resolve_render_mode, validate_profile
+from .measurements import spacing_metrics
+from .ink_clearance import InkClearance, GRID_MM, RASTER_UNCERTAINTY_MM
 from .variation import (OccurrenceVariation, stable_value, source_family, source_evidence, geometry_family,
                         contour_topology, interpolate_forms, curved_strokes)
 from .repetition import shape_descriptor, assess_pair, audit_repetition, NEAR_THRESHOLD_MM
@@ -55,6 +58,9 @@ class Box:
             item["strokes"] = map_strokes(item["strokes"], lambda px, py: (px + x, py + y))
             if "graph_plot_anchors_mm" in item:
                 item["graph_plot_anchors_mm"] = [[px+x, py+y] for px, py in item["graph_plot_anchors_mm"]]
+            if "body_ink_bounds_mm" in item:
+                left, top, right, bottom = item["body_ink_bounds_mm"]
+                item["body_ink_bounds_mm"] = [left+x, top+y, right+x, bottom+y]
         return result
 
 
@@ -70,10 +76,25 @@ def join(boxes, gap=0):
     return result
 
 
+def join_ink(left, right, gap):
+    """Translate intact boxes to a visible clearance, independent of bearings.
+
+    Isolated-source advances include crop padding, not observed letter/word
+    spacing. Measure the complete emitted ink (including caps and overhang)
+    so that this whitespace cannot be consumed by a terminal stroke.
+    """
+    if not left.items or not right.items:
+        return join([left, right], gap)
+    offset = left.bounds[2] + gap - right.bounds[0]
+    return Box(offset + right.advance, left.items + right.shifted(offset).items)
+
+
 class Shaper:
     def __init__(self, profile, seed, mode, size, nonces=None, page_hints=None):
         self.profile, self.seed, self.mode, self.size = profile, seed, mode, size
         self.forms, self.variant_history, self.variant_choices = {}, {}, {}
+        self.primitive_forms = {}
+        self.glyph_context = None
         self.history, self.word_history, self.current_page, self.nonces = {}, {}, 0, dict(nonces or {})
         self.used_families = {}
         self.observed_source_uses, self.observed_source_recency = Counter(), {}
@@ -83,9 +104,15 @@ class Shaper:
         self.page_hints = page_hints or {}
         self.observations = {entry["observation_id"]: entry for entry in profile.get("observations", [])}
         self.variation = OccurrenceVariation(profile, seed)
+        self.spacing = spacing_metrics(profile)
+        self.ink_clearance = InkClearance()
         self.corrections = []
         representation = "centerline" if mode == "fresh_strokes" else "clean_outline"
         for glyph in accepted_glyphs(profile):
+            if (glyph["representation"] == "centerline" and glyph["role"] == "math.operator"
+                    and glyph["text"] in {"−", "√"}
+                    and not (self.variation.observed_only and glyph.get("derivation"))):
+                self.primitive_forms.setdefault((glyph["role"], glyph["text"]), []).append(glyph)
             if glyph["representation"] == representation or glyph["role"] == "mark.correction":
                 if self.variation.observed_only and glyph.get("derivation"):
                     self.excluded_derived_count += 1
@@ -95,12 +122,18 @@ class Shaper:
             # One crop renamed or smoothed three times is still one example.
             families, shapes, claimed_evidence, derived = {}, set(), {}, []
             ordered = sorted(forms, key=lambda form: form["glyph_id"], reverse=True)
+            from .variant_context import source_context
+            context_sources = {source["source_id"]:source for source in profile.get("sources", [])}
+            contexts = {form["glyph_id"]:source_context(form,self.observations,context_sources) for form in forms}
+            ordered.sort(key=lambda form: contexts[form["glyph_id"]] is None)
             # Prefer individual observed occurrences over a derivative claiming
             # several of them. A+B is not a third independent sample beside A/B.
             ordered.sort(key=lambda form: len(source_evidence(form, self.observations)))
             for form in ordered:
                 calibration = json.dumps(form.get("outline_calibration", {}), sort_keys=True)
-                family, shape = (source_family(form, self.observations), calibration), (geometry_family(form), calibration)
+                context = contexts[form["glyph_id"]]
+                context_key = (context["kind"],context.get("normalization")) if context else None
+                family, shape = (source_family(form, self.observations), calibration), (geometry_family(form), calibration, context_key)
                 evidence = source_evidence(form, self.observations)
                 # An approved synthesis is a usable shape, never a new source
                 # observation. Keep its geometry bank beside the independent
@@ -116,6 +149,15 @@ class Shaper:
                     shapes.add(shape)
                     claimed.update(evidence)
             self.forms[key] = sorted([*families.values(), *derived], key=lambda form: form["glyph_id"])
+        from .variant_context import VariantContext
+        for key,forms in self.primitive_forms.items():
+            seen_families,seen_shapes,unique=set(),set(),[]
+            for form in sorted(forms,key=lambda value:value["glyph_id"],reverse=True):
+                family,shape=source_family(form,self.observations),geometry_family(form)
+                if family not in seen_families and shape not in seen_shapes:
+                    unique.append(form); seen_families.add(family); seen_shapes.add(shape)
+            self.primitive_forms[key]=sorted(unique,key=lambda value:value["glyph_id"])
+        self.variant_context = VariantContext(self.forms, self.observations, profile.get("sources", []))
 
     def commit_page(self, page, items):
         """Correct provisional occurrence pages after physical line placement."""
@@ -159,12 +201,15 @@ class Shaper:
             deltas.extend(math.hypot(a[0]-b[0], a[1]-b[1]) for a,b in pairs)
         return max(deltas, default=0) < .42 and sum(deltas)/max(1,len(deltas)) < .24
 
-    def glyph(self, text, role, token_id, size=None, word_id=None, position=0.5):
+    def glyph(self, text, role, token_id, size=None, word_id=None, position=0.5, *, context=None, primitive=False):
         if token_id in self.page_hints:
             self.commit_page(self.page_hints[token_id], [])
         size = self.size if size is None else size
-        forms = self.forms.get((role, text), [])
+        forms = self.primitive_forms.get((role,text), []) if primitive else self.forms.get((role, text), [])
         if not forms:
+            if primitive:
+                raise InkformError("unsupported_outline_primitive", "Expandable mathematical marks need a reviewed centerline source alongside the body forms.",
+                                   {"role":role,"text":text,"mode":self.mode})
             raise InkformError("missing_glyphs", "No reviewed geometry in the requested render mode.", {"missing_glyphs": [{"role": role, "text": text}], "mode": self.mode})
         if role == "mark.correction":
             # A reviewed pen mark is independent of the body representation.
@@ -172,19 +217,21 @@ class Shaper:
             forms = [form for form in forms if form["representation"] == "centerline"]
             if not forms:
                 raise InkformError("missing_correction_mark", "Cross-outs require a reviewed centerline mark from the writer's samples.", {"role": role, "text": text})
-        if self.mode == "clean_outline" and role != "mark.correction":
+        if self.mode == "clean_outline" and role != "mark.correction" and not primitive:
             compatible_size = [form for form in forms if "outline_calibration" in form and abs(size - form["outline_calibration"]["body_x_height_mm"]) <= 0.01]
             if not compatible_size:
                 raise InkformError("outline_scale_incompatible", "Filled outlines need a reviewed variant at the requested writing or script size.", {"role": role, "text": text, "requested_size_mm": size, "calibrated_sizes_mm": [form.get("outline_calibration", {}).get("body_x_height_mm") for form in forms]})
             forms = [form for form in compatible_size if abs(self.profile["pen"]["width_mm"] - form["outline_calibration"].get("pen_width_mm", form["outline_calibration"].get("effective_width_mm", -1))) <= 0.01]
             if not forms:
                 raise InkformError("outline_pen_incompatible", "Changing the pen model cannot change a filled outline's thickness; select a reviewed compatible variant.", {"role": role, "text": text, "requested_pen_width_mm": self.profile["pen"]["width_mm"]})
+        requested_context = context or self.glyph_context
+        forms,context_selection = self.variant_context.eligible(forms,text,role,requested_context)
         if self.variation.observed_only:
-            return self.observed_glyph(forms, text, role, token_id, size, word_id or token_id, position)
+            return self.observed_glyph(forms, text, role, token_id, size, word_id or token_id, position, context_selection)
         # Ink identity crosses semantic roles: text x and mathematical x
         # still must not reuse the same visible form on neighboring pages.
         history_key = text
-        choice_key = (role, text, size)
+        choice_key = (role, text, size, requested_context, primitive)
         used = self.used_families.setdefault(choice_key, set())
         def selection_family(form):
             return "derived:"+geometry_family(form) if form.get("derivation") else source_family(form, self.observations)
@@ -233,6 +280,7 @@ class Shaper:
                     "representation": source["representation"], "strokes": strokes,
                     "pen_width_mm": self.profile["pen"]["width_mm"]*factors["pen_width"], "nominal_size_mm": size,
                     "source_refs": refs, "semantic": True, "variation": factors}
+            item["variation"]["context_selection"] = copy.deepcopy(context_selection)
             descriptor = shape_descriptor(item) if self.variation.amount else None
             assessments = [assess_pair(descriptor, record["descriptor"], threshold_mm=NEAR_THRESHOLD_MM+.003) for record in records] if descriptor else []
             conflicts = [pair for pair in assessments if pair["category"] in {"exact", "near"}]
@@ -264,7 +312,7 @@ class Shaper:
         box.advance = max(box.advance - left, box.bounds[2] + 0.035 * size)
         return box
 
-    def observed_glyph(self, forms, text, role, token_id, size, word_id, position):
+    def observed_glyph(self, forms, text, role, token_id, size, word_id, position, context_selection=None):
         """Use the full real bank before returning to an earlier source form.
 
         No contour candidate search is involved: an exhausted source bank is
@@ -280,8 +328,13 @@ class Shaper:
             last = max((self.observed_source_recency.get((text, families[form["glyph_id"]]), -1)
                         for form in forms), default=-1)
             if last >= 0:
-                candidates = [form for form in candidates if self.observed_source_recency.get(
+                alternatives = [form for form in candidates if self.observed_source_recency.get(
                     (text, families[form["glyph_id"]]), -1) != last]
+                # Several aliases can still describe the same source family
+                # (for example an externally supplied primitive pool). Reuse
+                # that finite source when no different family is available.
+                if alternatives:
+                    candidates = alternatives
         index = min(len(candidates)-1, int(stable_value(self.seed, token_id, "observed-source") * len(candidates)))
         source = candidates[index]
         family = families[source["glyph_id"]]
@@ -296,6 +349,8 @@ class Shaper:
                        source_use_index=prior_uses+1, source_reused=bool(prior_uses),
                        derived_form_count=0, candidate_count=len(candidates),
                        selection="balanced_observations_without_immediate_reuse")
+        if context_selection is not None:
+            factors["context_selection"] = copy.deepcopy(context_selection)
         item = {"token_id": token_id, "glyph_id": source["glyph_id"], "text": text, "role": role,
                 "representation": source["representation"],
                 "strokes": map_strokes(source["strokes"], self.variation.transform(source, factors, size)),
@@ -366,7 +421,19 @@ class Shaper:
                 box = self.glyph(c, role, identity, size, token_id, i / max(1, len(letters) - 1))
                 for item in box.items:
                     item.update(word_id=token_id, word_position=i)
-                result = join([result, box], gap=0.025 * (size or self.size) * self.variation.letter_gap(identity)) if result.items else box
+                if role == "text":
+                    gap = self.letter_clearance(identity, size)
+                    for item in box.items:
+                        item["body_ink_bounds_mm"] = self.ink_clearance.body_bounds(item)
+                    if result.items:
+                        result = self.join_letters(result, box, gap)
+                    else:
+                        result = box.shifted(-box.bounds[0])
+                    # A run with no following whitespace can continue the same
+                    # word. Only its trailing letter clearance is reserved.
+                    result.advance = result.bounds[2] + gap
+                else:
+                    result = join([result, box], gap=0.025 * (size or self.size) * self.variation.letter_gap(identity)) if result.items else box
             descriptors, conflicts, scores, residuals, next_targets = [], [], [], [], {}
             if comparable:
                 for word, indexes in words:
@@ -397,15 +464,91 @@ class Shaper:
         self.word_targets = previous_targets
         return result
 
+    def letter_clearance(self, token_id, size=None):
+        size = self.size if size is None else size
+        observed = self.spacing.get("letter_gap_xheight")
+        gap = .12 if observed is None else observed
+        # This is a layout clearance, never a deformation of observed ink.
+        return max(.04 * size, .5 * self.profile["pen"]["width_mm"],
+                   gap * size * self.variation.letter_gap(token_id))
+
+    def whitespace(self, text, token_id):
+        observed = self.spacing.get("word_gap_xheight")
+        # An old estimated .72-xheight advance was not an ink clearance.
+        # Keep an explicitly larger metric, and make the fallback readable.
+        gap = max(1.2, self.profile["metrics"]["word_gap"]) if observed is None else observed
+        count = sum(4 if char == "\t" else 1 for char in text)
+        return count * gap * self.size * self.variation.word_gap(token_id)
+
+    def join_letters(self, left, right, gap):
+        """Attach body bands; let intact swashes occupy safely empty space."""
+        first, last = right.items[0], left.items[-1]
+        desired = last["body_ink_bounds_mm"][2] + gap - first["body_ink_bounds_mm"][0]
+        size = first.get("nominal_size_mm", self.size)
+        minimum = max(.04 * size, .5 * self.profile["pen"]["width_mm"])
+        offset = desired
+        if not self.ink_clearance.separated(left.items, right.items, offset, minimum):
+            # The full-ink position is always safe. Refine toward the desired
+            # body position, retaining a verified-safe upper endpoint even for
+            # nonmonotonic shapes with loops and detached dots.
+            low = desired
+            offset = max(desired, left.bounds[2] + minimum - right.bounds[0])
+            while offset-low > GRID_MM:
+                middle = (offset+low)/2
+                if self.ink_clearance.separated(left.items, right.items, middle, minimum):
+                    offset = middle
+                else:
+                    low = middle
+        right = right.shifted(offset)
+        right.items[0]["spacing_before"] = {
+            "kind": "letter", "placement": "body_band_with_2d_ink_clearance",
+            "requested_body_gap_mm": gap,
+            "body_gap_mm": right.items[0]["body_ink_bounds_mm"][0]-last["body_ink_bounds_mm"][2],
+            "minimum_ink_clearance_mm": minimum, "ink_clearance_verified": True,
+            "clearance_method": "complete_ink_masks_with_conservative_raster_margin",
+            "raster_grid_mm": GRID_MM, "raster_uncertainty_mm": RASTER_UNCERTAINTY_MM,
+            "horizontal_full_ink_gap_mm": item_bounds(right.items[0])[0]-item_bounds(last)[2],
+            "left_token_id": last["token_id"],
+        }
+        return Box(offset+right.advance, left.items+right.items)
+
+    def join_words(self, left, right, gap):
+        if not gap:
+            if (left.items and right.items and left.items[-1].get("body_ink_bounds_mm")
+                    and right.items[0].get("body_ink_bounds_mm")):
+                return self.join_letters(left, right, self.letter_clearance(right.items[0]["token_id"],
+                                                                          right.items[0].get("nominal_size_mm")))
+            return join([left, right])
+        if not left.items:
+            # Explicit indentation is retained; whitespace at an automatic
+            # line break is discarded by the paragraph's wrapping code.
+            return join([Box(left.advance + gap), right])
+        inner_gaps = []
+        for box in (left, right):
+            for first, second in zip(box.items, box.items[1:]):
+                if (first.get("word_id") and first.get("word_id") == second.get("word_id")
+                        and first["role"] == second["role"] == "text"):
+                    inner_gaps.append(max(0., item_bounds(second)[0] - item_bounds(first)[2]))
+        # The word boundary must remain distinguishable even when a measured
+        # source gap is smaller than this rendering's within-word clearances.
+        # Using the actual placed ink also covers different sizes and overhang.
+        minimum = max(inner_gaps, default=self.letter_clearance("word-boundary"))
+        clearance = max(gap, .9 * self.size, minimum * 3, minimum + .2 * self.size)
+        if right.items:
+            right = copy.deepcopy(right)
+            right.items[0]["spacing_before"] = {"kind": "word", "minimum_ink_gap_mm": clearance,
+                "requested_ink_gap_mm": gap, "left_token_id": max(left.items, key=lambda item: item_bounds(item)[2])["token_id"]}
+        return join_ink(left, right, clearance)
+
     def phrase(self, text, token_id):
         """Single-line text for an explicit correction, with original spaces."""
         result, pending_gap = Box(), 0
         for match in regex.finditer(r"\s+|[^\s]+", text):
             identity = f"{token_id}:{match.start()}"
             if match.group().isspace():
-                pending_gap += self.profile["metrics"]["word_gap"] * self.size * len(match.group()) * self.variation.word_gap(identity)
+                pending_gap += self.whitespace(match.group(), identity)
             else:
-                result = join([Box(result.advance + pending_gap, result.items), self.text(match.group(), "text", identity)])
+                result = self.join_words(result, self.text(match.group(), "text", identity), pending_gap)
                 pending_gap = 0
         result.advance += pending_gap
         return result
@@ -413,11 +556,26 @@ class Shaper:
     def has_correction_mark(self):
         return any(form["representation"] == "centerline" for form in self.forms.get(("mark.correction", "crossout"), []))
 
-    def correction(self, deleted, replacement, token_id, kind, replacement_box=None):
+    def restart_attempt(self, text, token_id):
+        """A partial textual start using only already-covered source letters.
+
+        This is explicitly an estimated writing event, not an observed error
+        or a changed mathematical answer. Supplied document deletions do not
+        pass through this sampler and retain their exact text.
+        """
+        letters = clusters(text)
+        positions = [i for i, char in enumerate(letters) if regex.search(r"\p{L}", char)]
+        if len(positions) < 2:
+            return None
+        count = 1 + int(stable_value(self.seed, token_id, "restart-prefix") * (len(positions)-1))
+        return "".join(letters[:positions[count-1]+1])
+
+    def correction(self, deleted, replacement, token_id, kind, replacement_box=None, *,
+                   deleted_box=None, deleted_expression=None, replacement_expression=None):
         if not self.has_correction_mark():
             raise InkformError("missing_correction_mark", "A correction needs a reviewed centerline cross-out mark from the writer's samples.", {"node": token_id, "missing_glyphs": [{"role": "mark.correction", "text": "crossout"}]})
         identity = token_id + ".correction"
-        old = self.phrase(deleted, token_id + ".deleted")
+        old = self.phrase(deleted, token_id + ".deleted") if deleted_box is None else copy.deepcopy(deleted_box)
         new = self.phrase(replacement, token_id + ".replacement") if replacement_box is None else copy.deepcopy(replacement_box)
         mark = self.glyph("crossout", "mark.correction", token_id + ".crossout")
         left, top, right, bottom = old.bounds
@@ -437,11 +595,12 @@ class Shaper:
             for item in box.items:
                 item.update(semantic=semantic, correction_id=identity, correction_part=part)
         crossed = Box(max(old.advance, mark.bounds[2]), old.items + mark.items)
-        gap = self.profile["metrics"]["word_gap"] * self.size * self.variation.word_gap(token_id + ".restart-gap")
-        result = join([crossed, new], gap) if new.items else crossed
+        gap = self.whitespace(" ", token_id + ".restart-gap")
+        result = self.join_words(crossed, new, gap) if new.items else crossed
         habit = self.profile.get("corrections", {}) if kind == "sampled_restart" else {}
         self.corrections.append({
             "id": identity, "kind": kind, "deleted": deleted, "replacement": replacement,
+            "content_type": "math" if deleted_expression is not None else "text",
             "deleted_token_ids": [item["token_id"] for item in old.items],
             "mark_token_ids": [item["token_id"] for item in mark.items],
             "replacement_token_ids": [item["token_id"] for item in new.items],
@@ -449,11 +608,44 @@ class Shaper:
             "basis": habit.get("basis", "explicit_document"), "sampled_rate": habit.get("rate"),
             "habit_observation_ids": copy.deepcopy(habit.get("observation_ids", [])),
             "habit_source_refs": copy.deepcopy(habit.get("source_refs", [])),
+            **({"deleted_expression": copy.deepcopy(deleted_expression),
+                "replacement_expression": copy.deepcopy(replacement_expression)} if deleted_expression is not None else {}),
+            **({"attempt_basis": "estimated_partial_fragment" if deleted_expression is not None else "estimated_partial_word_restart", "attempt_observed": False}
+               if kind == "sampled_restart" else {}),
         })
         return result
 
+    def math_run(self, expression, token_id, *, deleted_expression=None, sampled_rate=0, available=None):
+        """An intact intended expression beside an explicit or sampled cut."""
+        explicit = deleted_expression is not None
+        original = self.math(expression, token_id + ".replacement" if explicit else token_id)
+        if not explicit:
+            if not sampled_rate or stable_value(self.seed, token_id, "sampled-correction") >= sampled_rate:
+                return original
+            fragments = math_restart_fragments(expression)
+            if not fragments:
+                return original
+            index = min(len(fragments)-1, int(stable_value(self.seed, token_id, "restart-fragment") * len(fragments)))
+            deleted_expression = fragments[index]
+        # An optional restart must not consume source selections if its extra
+        # ink makes an otherwise printable expression exceed the line width.
+        tracked = ("observed_source_uses", "observed_source_recency", "observed_sequence", "history",
+                   "variant_history", "used_families", "word_history", "nonces")
+        state = {key: copy.deepcopy(getattr(self, key)) for key in tracked} if not explicit else None
+        deleted = self.math(deleted_expression, token_id + ".deleted")
+        result = self.correction(math_text(deleted_expression), math_text(expression), token_id,
+                                 "explicit" if explicit else "sampled_restart", replacement_box=original,
+                                 deleted_box=deleted, deleted_expression=deleted_expression,
+                                 replacement_expression=expression)
+        if not explicit and available is not None and max(result.advance, result.bounds[2])-min(0, result.bounds[0]) > available:
+            self.corrections.pop()
+            for key, value in state.items():
+                setattr(self, key, value)
+            return original
+        return result
+
     def bar(self, width, y, token_id, size):
-        box = self.glyph("−", "math.operator", token_id, size)
+        box = self.glyph("−", "math.operator", token_id, size, primitive=True)
         if box.items[0]["representation"] != "centerline":
             raise InkformError("unsupported_outline_primitive", "Stretchable mathematical marks require reviewed centerlines.")
         bounds = geometry_bounds(box.items[0]["strokes"])
@@ -490,7 +682,13 @@ class Shaper:
             boxes.append(self.glyph(")", "math.operator", token_id + ".close", size))
             return join(boxes, 0.10 * size)
         if typ in {"superscript", "subscript"}:
-            base, script = child("base"), child("script", 0.68)
+            base = child("base")
+            previous_context = self.glyph_context
+            self.glyph_context = typ
+            try:
+                script = child("script", 0.68)
+            finally:
+                self.glyph_context = previous_context
             sx = max(base.advance, base.bounds[2]) + size * 0.1
             sy = base.bounds[1] + 0.28 * size if typ == "superscript" else base.bounds[3] - script.bounds[1] + size * 0.12
             result = Box(sx + script.advance, base.items + script.shifted(sx, sy).items)
@@ -508,18 +706,37 @@ class Shaper:
             return Box(width + 0.12 * size, num.items + den.items + bar.items)
         if typ == "root":
             body = child("body")
-            radical = self.glyph("√", "math.operator", token_id + ".radical", size)
+            radical = self.glyph("√", "math.operator", token_id + ".radical", size, primitive=True)
             if radical.items[0]["representation"] != "centerline":
                 raise InkformError("unsupported_outline_primitive", "Expandable roots require centerlines.")
-            rb, bb = radical.bounds, body.bounds
+            rb, bb = geometry_bounds(radical.items[0]["strokes"]), body.bounds
             target_top = bb[1] - size * 0.30
             target_bottom = bb[3]
             radical.items[0]["strokes"] = map_strokes(radical.items[0]["strokes"], lambda x, y: (x, target_top + (y - rb[1]) * (target_bottom - target_top) / (rb[3] - rb[1])))
             radical.items[0]["variation"].update(source_shape_preserved=False,
                                                  source_geometry_transform="fit_radical_to_radicand_height")
-            x = radical.advance + size * 0.05
-            bar = self.bar(body.advance + size * 0.15, target_top, token_id + ".bar", size).shifted(x)
-            return Box(x + body.advance + size * 0.15, radical.items + body.shifted(x).items + bar.items)
+            # Join actual pen endpoints. The source advance includes crop
+            # padding, and its ink bounds include round caps; neither names the
+            # end of the radical's upper arm. Starting the roof at that advance
+            # left a visible break in every expanded radical.
+            endpoints = [point for stroke in radical.items[0]["strokes"] if not stroke.get("closed")
+                         for point in (stroke["start"], stroke["segments"][-1]["end"])]
+            if not endpoints:
+                raise InkformError("invalid_primitive", "The reviewed radical needs an open upper-arm endpoint.")
+            upper = [point for point in endpoints if point[1] <= target_top + .4 * (target_bottom-target_top)]
+            attachment = max(upper or endpoints, key=lambda point: point[0])
+            x = radical.bounds[2] + size * .12 - bb[0]
+            roof_end = x + bb[2] + size * .15
+            bar = self.bar(roof_end - attachment[0], target_top, token_id + ".bar", size)
+            bar_endpoints = [point for stroke in bar.items[0]["strokes"] if not stroke.get("closed")
+                             for point in (stroke["start"], stroke["segments"][-1]["end"])]
+            if not bar_endpoints:
+                raise InkformError("invalid_primitive", "The reviewed root bar needs an open endpoint.")
+            start = min(bar_endpoints, key=lambda point: point[0])
+            bar = bar.shifted(attachment[0]-start[0], attachment[1]-start[1])
+            bar.items[0]["construction"] = "joined_writer_root_bar"
+            bar.items[0]["root_radical_token_id"] = radical.items[0]["token_id"]
+            return Box(max(roof_end, bar.bounds[2]), radical.items + body.shifted(x).items + bar.items)
         if typ == "limit":
             label = self.text("lim", "math.function", token_id + ".label", size)
             approach = child("approaches", 0.60)
@@ -541,7 +758,9 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
     validate_document(document); validate_profile(profile)
     mode = resolve_render_mode(profile, mode)
     representation = "centerline" if mode == "fresh_strokes" else "clean_outline"
-    eligible = {**profile, "glyphs": [g for g in profile["glyphs"] if g["representation"] == representation]}
+    eligible = {**profile, "glyphs": [g for g in profile["glyphs"] if g["representation"] == representation
+                                    or (g["representation"] == "centerline" and g["role"] == "math.operator"
+                                        and g["text"] in {"−", "√"})]}
     needed = requirements(document)
     cov = coverage(eligible, needed)
     visible_cov = coverage(eligible, visible_requirements(document))
@@ -559,7 +778,6 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
     correction_mode = document.get("handwriting", {}).get("corrections", profile.get("output_preferences", {}).get("corrections", "sampled"))
     sampled_rate = habit.get("rate", 0) if correction_mode == "sampled" and shaper.has_correction_mark() else 0
     line_height = profile["metrics"]["line_height"] * size
-    word_gap = profile["metrics"]["word_gap"] * size
     instances, lines = [], []
     page_index, cursor = 0, margins["top"]
 
@@ -591,7 +809,9 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
                 from .graphs import graph_box
                 box = graph_box(block["graph"], shaper, json.dumps(block["id"], ensure_ascii=True))
             else:
-                box = shaper.math(block["expression"], json.dumps(block["id"], ensure_ascii=True))
+                box = shaper.math_run(block["expression"], json.dumps(block["id"], ensure_ascii=True),
+                                      deleted_expression=block.get("deleted_expression"),
+                                      sampled_rate=sampled_rate, available=available)
             for item in box.items:
                 item.update(content_node_id=block["id"], block_id=block["id"])
             place(box, block["id"])
@@ -599,8 +819,10 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
             line, n, pending_gap = Box(), 0, 0
             for run in block["children"]:
                 run_token_id = json.dumps(run["id"], ensure_ascii=True)
-                if run["type"] == "inline_math":
-                    chunks = [(None, shaper.math(run["expression"], run_token_id))]
+                if run["type"] in {"inline_math", "math_correction"}:
+                    chunks = [(None, shaper.math_run(run["expression"], run_token_id,
+                              deleted_expression=run.get("deleted_expression") if run["type"] == "math_correction" else None,
+                              sampled_rate=sampled_rate, available=available))]
                 elif run["type"] == "correction":
                     chunks = [(None, shaper.correction(run["deleted"], run["text"], run_token_id, "explicit"))]
                 else:
@@ -610,14 +832,15 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
                         if "\n" in text or "\r" in text:
                             place(line, f"{block['id']}.line{n}"); line = Box(); n += 1; pending_gap = 0
                         else:
-                            pending_gap += word_gap * sum(4 if ch == "\t" else 1 for ch in text) * shaper.variation.word_gap(f"{run_token_id}:{box_or_offset}")
+                            pending_gap += shaper.whitespace(text, f"{run_token_id}:{box_or_offset}")
                         continue
                     box = box_or_offset if text is None else shaper.text(text, "text", f"{run_token_id}:{box_or_offset}")
-                    if text is not None and sampled_rate and len(clusters(text)) > 1 and regex.search(r"\p{L}", text) and stable_value(seed, f"{run_token_id}:{box_or_offset}", "sampled-correction") < sampled_rate:
+                    attempted = shaper.restart_attempt(text, f"{run_token_id}:{box_or_offset}") if text is not None and sampled_rate else None
+                    if attempted and stable_value(seed, f"{run_token_id}:{box_or_offset}", "sampled-correction") < sampled_rate:
                         original = box
                         source_state = (shaper.observed_source_uses.copy(), shaper.observed_source_recency.copy(),
                                         shaper.observed_sequence, {key: list(value) for key, value in shaper.history.items()})
-                        box = shaper.correction(text, text, f"{run_token_id}:{box_or_offset}", "sampled_restart", replacement_box=original)
+                        box = shaper.correction(attempted, text, f"{run_token_id}:{box_or_offset}", "sampled_restart", replacement_box=original)
                         if max(box.advance, box.bounds[2]) - min(0, box.bounds[0]) > available:
                             # Optional sample-derived texture must not make a
                             # previously printable word become unbreakable.
@@ -628,8 +851,8 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
                             box = original
                     for item in box.items:
                         item.update(content_node_id=run["id"], block_id=block["id"])
-                    candidate = join([Box(line.advance + pending_gap, line.items), box])
-                    if line.items and max(candidate.advance, candidate.bounds[2]) > available:
+                    candidate = shaper.join_words(line, box, pending_gap)
+                    if line.items and max(candidate.advance, candidate.bounds[2])-min(0, candidate.bounds[0]) > available:
                         place(line, f"{block['id']}.line{n}"); line = box; n += 1
                     else:
                         line = candidate
@@ -645,7 +868,14 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
     if len(set(token_ids)) != len(token_ids) or rendered != expected:
         raise InkformError("content_accounting_failed", "The shaped geometry must account for every required symbol in its exact role.", {"required": len(needed), "rendered": len(instances), "missing": [{"role": role, "text": text, "count": count} for (role, text), count in (expected - rendered).items()], "unexpected": [{"role": role, "text": text, "count": count} for (role, text), count in (rendered - expected).items()]})
     geometry_hash = hashlib.sha256(json.dumps(instances, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
-    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "graphs": getattr(shaper, "graphs", []), "variation": {"version": "inkform-occurrence-3", "mode": shaper.variation.mode, "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}, "source_usage": _source_usage(instances, shaper)}
+    spacing = {**copy.deepcopy(shaper.spacing), "version": "inkform-ink-clearance-2",
+               "letter_placement": "body_band_with_verified_complete_2d_ink_clearance",
+               "word_measurement": "complete_ink_bounds_including_pen_and_overhang",
+               "collision_raster_grid_mm": GRID_MM, "collision_raster_uncertainty_mm": RASTER_UNCERTAINTY_MM,
+               "fallback_letter_gap_xheight": .12, "fallback_word_gap_xheight": 1.2,
+               "minimum_word_gap_xheight": .9, "minimum_word_to_letter_gap_ratio": 3,
+               "source_paths_changed": False}
+    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "graphs": getattr(shaper, "graphs", []), "spacing": spacing, "variation": {"version": "inkform-occurrence-3", "mode": shaper.variation.mode, "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}, "source_usage": _source_usage(instances, shaper)}
 
 
 def _source_usage(instances, shaper):

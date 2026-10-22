@@ -14,6 +14,8 @@ Optional word layout observations have this explicit contract::
 
 Boxes and x-height must share source-pixel coordinates. Word indices must be
 consecutive to contribute a gap. A column_id may further disambiguate lines.
+Optional letter_boxes_px records contain an index and bbox_xywh in the same
+source coordinates, for visibly separated, consecutive letters inside a word.
 OCR confidence, crop ordering, and isolated glyph advances do not satisfy this
 layout contract. No synthetic profile receives learned metric updates.
 """
@@ -195,6 +197,83 @@ def _relative_spread(values: list[float], maximum: float) -> float:
     return min(maximum, 1.4826 * median(abs(value-center) for value in values) / center)
 
 
+def spacing_metrics(profile: dict) -> dict:
+    """Read actual ink gaps, independently of isolated glyph sidebearings.
+
+    Exact source hashes and reviewed context are required. Missing evidence is
+    returned as None so the renderer can label its readability defaults honestly.
+    Reimporting an observation under a new ID cannot increase the sample count.
+    """
+    result = {"word_gap_xheight": None, "letter_gap_xheight": None,
+              "basis": "unavailable", "word_sample_count": 0,
+              "letter_sample_count": 0, "observation_ids": []}
+    if profile.get("synthetic"):
+        return result
+    sources = {record["source_id"]: record for record in profile.get("sources", [])}
+    words, seen = [], set()
+    for record in profile.get("observations", []):
+        source_hash = sources.get(record.get("source_id"), {}).get("sha256")
+        box, height = record.get("bbox_xywh"), record.get("xheight_px")
+        if (record.get("kind") != "word" or record.get("label_status") != "reviewed"
+                or record.get("layout_status") != "reviewed" or not reviewed_actor(record.get("reviewed_by"))
+                or not source_hash or record.get("source_sha256") != source_hash
+                or not isinstance(box, list) or len(box) != 4 or not all(_finite(v) for v in box)
+                or min(box[2:]) <= 0 or not _finite(height) or height <= 0):
+            continue
+        key = (source_hash, record.get("page_index"), tuple(box))
+        if key in seen:
+            continue
+        seen.add(key)
+        words.append(record)
+    gaps, _ = _word_gaps(words)
+    # Use physical source/line position as well as the declared line identity.
+    line_keys = {(sources[gap["source_id"]]["sha256"], gap["page_index"],
+                  gap["column_id"], gap["line_id"]) for gap in gaps}
+    supported_words = gaps if len(gaps) >= 3 and len(line_keys) >= 2 else []
+    letters, letter_words, ids = [], set(), set()
+    for word in words:
+        boxes = word.get("letter_boxes_px", [])
+        if (not isinstance(boxes, list) or not isinstance(word.get("line_id"), str)
+                or not word["line_id"].strip()
+                or any(not isinstance(word.get(field), int) or isinstance(word[field], bool)
+                       or word[field] < 0 for field in ("page_index", "word_index"))):
+            continue
+        valid, indices = [], set()
+        wx, wy, ww, wh = word["bbox_xywh"]
+        for item in boxes:
+            if not isinstance(item, dict) or item.get("review_status", "reviewed") != "reviewed":
+                continue
+            index, box = item.get("index"), item.get("bbox_xywh")
+            if (not isinstance(index, int) or isinstance(index, bool) or index < 0
+                    or not isinstance(box, list) or len(box) != 4 or not all(_finite(v) for v in box)
+                    or min(box[2:]) <= 0 or box[0] < wx or box[1] < wy
+                    or box[0]+box[2] > wx+ww or box[1]+box[3] > wy+wh):
+                continue
+            if index in indices:
+                valid = []
+                break
+            indices.add(index)
+            valid.append(item)
+        valid.sort(key=lambda item: item["index"])
+        for left, right in zip(valid, valid[1:]):
+            lb, rb = left["bbox_xywh"], right["bbox_xywh"]
+            gap = rb[0]-(lb[0]+lb[2])
+            if right["index"] != left["index"]+1 or gap <= 0:
+                continue
+            letters.append(gap/word["xheight_px"])
+            letter_words.add(word["observation_id"])
+    if len(letters) >= 6 and len(letter_words) >= 2:
+        result.update(letter_gap_xheight=median(letters), letter_sample_count=len(letters))
+        ids.update(letter_words)
+    if supported_words:
+        result.update(word_gap_xheight=median(gap["gap_xheight"] for gap in supported_words),
+                      word_sample_count=len(supported_words))
+        ids.update(gap[key] for gap in supported_words for key in ("left_observation_id", "right_observation_id"))
+    if ids:
+        result.update(basis="reviewed_source_ink_boxes", observation_ids=sorted(ids))
+    return result
+
+
 def _variation_update(profile, grouped, observations, gaps, line_count):
     if profile["synthetic"]:
         return None
@@ -322,6 +401,7 @@ def measure_style(profile: dict) -> dict:
             "accepted_glyph_records": len(all_accepted), "observed_glyph_records": len(accepted),
             "derived_glyph_records": len(all_accepted)-len(accepted), "unique_letter_form_samples": len(glyphs),
             "form_geometry": forms, "word_gap_samples": gaps, "word_gap_exclusions": exclusions,
+            "spacing": spacing_metrics(profile),
             "metric_updates": updates, "metric_update_evidence": evidence, "retained_metrics": copy.deepcopy(profile["metrics"]),
             "variation_update": variation, "correction_update": corrections, "correction_frequency_exclusions": correction_exclusions,
             "variation_dimension_exclusions": dimension_exclusions,

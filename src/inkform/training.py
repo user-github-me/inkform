@@ -131,7 +131,9 @@ def _readiness(profile, document) -> dict:
         return {"status": "not_checked", "ready": False, "renderable": False, "content_complete": False, "reason": "Supply an actual document to check its exact forms and mathematical layout."}
     mode = resolve_render_mode(profile)
     representation = "centerline" if mode == "fresh_strokes" else "clean_outline"
-    eligible = {**profile, "glyphs": [g for g in profile["glyphs"] if g["representation"] == representation]}
+    eligible = {**profile, "glyphs": [g for g in profile["glyphs"] if g["representation"] == representation
+        or (g["representation"] == "centerline" and (g["role"] == "mark.correction"
+            or (g["role"] == "math.operator" and g["text"] in {"−", "√"})))]}
     cov = coverage(eligible, visible_requirements(document))
     unresolved = copy.deepcopy(document.get("unresolved_inputs", []))
     result = {"status": "missing_glyphs" if not cov["complete"] else "coverage_complete", "ready": False, "renderable": False, "content_complete": not unresolved,

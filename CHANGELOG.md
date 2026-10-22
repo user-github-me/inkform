@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2 — 2026-10-22
+
+- Group prose letters using actual ink edges, with clear word spaces across paragraphs, graph labels, wrapping, and corrected text. Learn gap medians from reviewed source word/letter boxes and report readability defaults when evidence is missing.
+- Transfer reviewed graph-axis, curve, tick, and marker traces into new diagrams, preserving data anchors and marker meaning. Record source evidence and verify the emitted PDF against it.
+- Join expandable root hooks and roofs at their actual stroke endpoints, independent of source crop padding.
+- Show partial attempts in sampled corrections; support explicit and sampled mathematical corrections while retaining the intended expression.
+- Choose context-compatible source variants before balancing diversity, and report uncertain size or source-context evidence.
+- Update the agent workflow to inspect whole sentences, mathematical context, and graph samples alongside individual letter forms.
+
 ## 0.4.1 — 2026-10-22
 
 - Make observed source forms the default: exclude synthesized forms, contour warps, interpolation, and invented letter or arrow curves from ordinary output. Preserve internal construction while rotating real reviewed occurrences.

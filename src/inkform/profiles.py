@@ -405,6 +405,8 @@ def validate_profile(profile: dict) -> dict:
                     _invalid("Width profiles must run from 0 to 1 with strictly increasing positions.", f"{stroke_path}/width_profile")
     _validate_derivations(profile)
     _validate_style_models(profile, observations)
+    from .variant_context import validate_source_context
+    validate_source_context(profile)
     if "graph_style" in profile:
         from .graphs import validate_graph_style
         validate_graph_style(profile)

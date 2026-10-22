@@ -5,7 +5,7 @@ import math
 
 import pytest
 
-from inkform.measurements import measure_style
+from inkform.measurements import measure_style, spacing_metrics
 from inkform.profiles import validate_profile
 
 
@@ -166,6 +166,65 @@ def test_synthetic_geometry_cannot_be_claimed_as_personal_spacing_training(profi
     assert result["measurements"]["word_gap_xheight"]["count"] == 4
     assert result["metric_updates"] == {}
     assert any("synthetic demonstration" in item for item in result["uncertainties"])
+
+
+def source_spacing(profile):
+    profile["sources"][0]["sha256"] = "a"*64
+    add_words(profile, 0, [0, 18, 36])
+    add_words(profile, 1, [0, 18, 36])
+    for word in profile["observations"]:
+        word["source_sha256"] = "a"*64
+        x, y = word["bbox_xywh"][:2]
+        word["letter_boxes_px"] = [{"index": i, "bbox_xywh": [x+i*3, y, 2, 12]} for i in range(3)]
+
+
+def test_render_spacing_uses_source_context_and_deduplicates_reimports(profile):
+    source_spacing(profile)
+    result = spacing_metrics(profile)
+    assert result["letter_gap_xheight"] == pytest.approx(.1)
+    assert result["word_gap_xheight"] == pytest.approx(.8)
+    assert result["word_sample_count"] == 4
+    assert result["letter_sample_count"] == 12
+    aliases = copy.deepcopy(profile["observations"])
+    for record in aliases:
+        record["observation_id"] += "-reimport"
+        record["line_id"] += "-reimport"
+    profile["observations"].extend(aliases)
+    assert spacing_metrics(profile) == result
+    assert measure_style(profile)["spacing"] == result
+
+
+@pytest.mark.parametrize("change", ["unreviewed", "wrong-source", "no-line", "synthetic"])
+def test_render_spacing_rejects_unverified_or_contextless_evidence(profile, change):
+    source_spacing(profile)
+    for word in profile["observations"]:
+        if change == "unreviewed":
+            word["layout_status"] = "proposed"
+        elif change == "wrong-source":
+            word["source_sha256"] = "b"*64
+        elif change == "no-line":
+            del word["line_id"]
+    if change == "synthetic":
+        profile["synthetic"] = True
+    result = spacing_metrics(profile)
+    assert result["letter_gap_xheight"] is None
+    assert result["word_gap_xheight"] is None
+
+
+def test_letter_gap_evidence_rejects_crop_padding_skipped_letters_and_ambiguous_indices(profile):
+    source_spacing(profile)
+    for index, word in enumerate(profile["observations"]):
+        boxes = word["letter_boxes_px"]
+        if index % 3 == 0:
+            boxes[1]["bbox_xywh"][0] += 500  # outside the reviewed word
+        elif index % 3 == 1:
+            boxes[1]["index"] = 0  # ambiguous identity
+        else:
+            for box in boxes:
+                box["index"] *= 2  # no neighboring letters
+    result = spacing_metrics(profile)
+    assert result["letter_gap_xheight"] is None
+    assert result["word_gap_xheight"] == pytest.approx(.8)
 
 
 def frequency(profile, identity, words=100, corrections=5, *, scope="page", box=None, reviewed=True, representative=True):

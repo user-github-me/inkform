@@ -194,11 +194,14 @@ def run(args):
             rep = "centerline" if mode == "fresh_strokes" else "clean_outline"
             eligible = {**profile, "glyphs": [g for g in profile["glyphs"] if
                 (g["role"] != "mark.correction" and g["representation"] == rep)
-                or (g["role"] == "mark.correction" and g["representation"] == "centerline")]}
+                or (g["role"] == "mark.correction" and g["representation"] == "centerline")
+                or (g["representation"] == "centerline" and g["role"] == "math.operator" and g["text"] in {"−", "√"})]}
             document = load_document(args.document)
             needed = visible_requirements(document)
             needed.extend(("mark.correction", "crossout") for block in document["blocks"]
-                          for run in block.get("children", []) if run["type"] == "correction")
+                          for run in block.get("children", []) if run["type"] in {"correction", "math_correction"})
+            needed.extend(("mark.correction", "crossout") for block in document["blocks"]
+                          if block["type"] == "display_math" and "deleted_expression" in block)
             result = coverage(eligible, needed)
             return {"ok": result["complete"], "mode": mode, **result}
         result = _summary(profile)

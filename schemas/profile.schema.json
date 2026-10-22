@@ -246,6 +246,20 @@
       "type": "object", "required": ["source_id"],
       "properties": {"source_id": {"$ref": "#/$defs/safeId"}, "observation_id": {"$ref": "#/$defs/safeId"}}
     },
+    "sourceContext": {
+      "anyOf": [{"type": "string"}, {"$ref": "#/$defs/reviewedSourceContext"}]
+    },
+    "reviewedSourceContext": {
+      "type": "object",
+      "required": ["kind", "review_status"],
+      "properties": {
+        "kind": {"enum": ["body", "capital", "baseline_digit", "superscript", "subscript"]},
+        "review_status": {"$ref": "#/$defs/reviewStatus"},
+        "reviewed_by": {"type": ["string", "null"]},
+        "normalization": {"enum": ["context_xheight", "body_xheight"]}
+      },
+      "additionalProperties": false
+    },
     "observation": {
       "type": "object",
       "required": [
@@ -258,6 +272,21 @@
         },
         "source_id": {
           "$ref": "#/$defs/safeId"
+        },
+        "source_context": {"$ref": "#/$defs/sourceContext"},
+        "letter_boxes_px": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["index", "bbox_xywh"],
+            "properties": {
+              "index": {"type": "integer", "minimum": 0},
+              "label": {"type": "string"},
+              "review_status": {"$ref": "#/$defs/reviewStatus"},
+              "bbox_xywh": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}}
+            },
+            "additionalProperties": false
+          }
         },
         "mask_sha256": {
           "type": "string",
@@ -381,6 +410,7 @@
       "required": ["glyph_id", "text", "role", "representation", "advance", "ink_bounds", "strokes", "source_refs", "label_status", "geometry_status", "reviewed_by", "stroke_order_status"],
       "properties": {
         "glyph_id": {"$ref": "#/$defs/safeId"},
+        "source_context": {"$ref": "#/$defs/sourceContext"},
         "text": {"type": "string", "minLength": 1},
         "role": {"enum": ["text", "math.variable", "math.digit", "math.operator", "math.function", "mark.correction"]},
         "synthetic": {"type": "boolean"},

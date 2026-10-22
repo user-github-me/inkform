@@ -6,7 +6,7 @@ inkform render document.json --profile personal-default --seed 72 --paper A4 --o
 inkform check build/notes.pdf --manifest build/notes.build.json
 ```
 
-`fresh_strokes` requires reviewed centerlines. `clean_outline` requires reviewed closed outlines at a compatible physical size and nominal pen calibration; scripts and extended primitives need suitable centerlines or explicitly reviewed variants. Rendering never reads a source bitmap. Missing coverage and layout overflow return structured errors with exit code 2, before replacing the deliverable.
+`fresh_strokes` requires reviewed centerlines. `clean_outline` requires reviewed closed outlines at a compatible physical size and nominal pen calibration, including separately calibrated script sizes. Expandable bars and radicals use reviewed `−` and `√` centerlines alongside the outline body. Rendering never reads a source bitmap. Missing coverage and layout overflow return structured errors with exit code 2, before replacing the deliverable.
 
 Omitting `--mode` honors the profile's `default_render_mode` (older profiles default to `fresh_strokes`). Explicit modes remain strict: choosing fuller outlines does not silently substitute centerlines for missing script sizes. Retain both representations under different glyph IDs when adding refined outlines to a profile.
 

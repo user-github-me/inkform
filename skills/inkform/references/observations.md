@@ -109,6 +109,31 @@ Add the following word with its own ID, `word_index: 1`, and inspected box.
 The gap comes from consecutive words on the same line, normalized by x-height;
 isolated glyph advances cannot establish it. Learning the word-gap median and
 spread needs at least three trusted adjacent gaps across at least two lines.
+The rendering spacing model requires matching stored source hashes.
+
+For within-word spacing, add `letter_boxes_px` to reviewed word observations:
+
+```json
+"letter_boxes_px": [
+  {"index": 0, "label": "a", "bbox_xywh": [40, 20, 18, 30]},
+  {"index": 1, "label": "n", "bbox_xywh": [61, 20, 20, 30]}
+]
+```
+
+Use original source coordinates and complete ink bounds, including detached
+marks. Indices must identify actual adjacent letters within that word; omit
+joined or ambiguous boundaries. At least six positive adjacent-letter gaps
+across two reviewed words support the median. Reimported boxes cannot increase
+evidence counts. Prose layout uses actual ink edges, avoiding invented
+sidebearings from isolated crops. Within a word, main letter bodies determine
+placement; complete two-dimensional ink masks keep descenders, dots, and
+swashes from colliding. Their horizontal bounding boxes may overlap when the
+actual ink remains separate. Word boundaries still use complete ink edges.
+When measurements are absent, the explicit
+readability defaults are 0.12 x-height within words and at least 1.2 x-height
+between words. A word-separation floor still protects readability when a
+sample has unusually narrow spaces. The build manifest reports the measured
+basis, sample counts, and the applied spacing policy.
 
 For corrections, count **all** words and corrected words in a representative
 page or region, including words without a cross-out. Add a frequency row:

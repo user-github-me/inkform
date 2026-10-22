@@ -1,9 +1,11 @@
 """Validated semantic documents. No OCR, solving, or implicit rewriting here."""
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
+from collections import Counter
 from pathlib import Path
 
 import regex
@@ -115,7 +117,7 @@ def validate_document(document):
         identifier(block, path)
         if block.get("type") == "paragraph":
             if not isinstance(block.get("children"), list) or not block["children"]:
-                fail("Paragraphs need typed text, correction, or inline_math children.", path)
+                fail("Paragraphs need typed text, correction, math_correction, or inline_math children.", path)
             for j, run in enumerate(block["children"]):
                 if not isinstance(run, dict):
                     fail("Expected a run object.", path)
@@ -124,8 +126,10 @@ def validate_document(document):
                     _string(run.get("text"), path + ".text", False)
                     if any(ord(ch) < 32 and ch not in "\n\t\r" for ch in run["text"]):
                         fail("Text contains unsupported control characters.", path)
-                elif run.get("type") == "inline_math":
+                elif run.get("type") in {"inline_math", "math_correction"}:
                     validate_expression(run.get("expression"), path)
+                    if run["type"] == "math_correction":
+                        validate_expression(run.get("deleted_expression"), path + ".deleted_expression")
                 elif run.get("type") == "correction":
                     run_path = f"{path}.children[{j}]"
                     _string(run.get("deleted"), run_path + ".deleted")
@@ -138,6 +142,8 @@ def validate_document(document):
                     fail("Unsupported paragraph child.", path)
         elif block.get("type") == "display_math":
             validate_expression(block.get("expression"), path)
+            if "deleted_expression" in block:
+                validate_expression(block["deleted_expression"], path + ".deleted_expression")
         elif block.get("type") == "graph":
             from .graphs import validate_graph
             validate_graph(block.get("graph"), path + ".graph")
@@ -202,25 +208,29 @@ def math_requirements(expr):
 
 
 def requirements(document, *, include_deleted=False):
-    """Semantic symbols by default; optionally include visible deleted text."""
+    """Semantic symbols by default; optionally include visible deleted ink."""
     validate_document(document)
     result = []
     for block in document["blocks"]:
         if block["type"] == "display_math":
             result.extend(math_requirements(block["expression"]))
+            if include_deleted and "deleted_expression" in block:
+                result.extend(math_requirements(block["deleted_expression"]))
         elif block["type"] == "graph":
             from .graphs import graph_requirements
             result.extend(graph_requirements(block["graph"]))
         else:
             for run in block["children"]:
-                result.extend(math_requirements(run["expression"]) if run["type"] == "inline_math" else [("text", c) for c in clusters(run["text"]) if not c.isspace()])
+                result.extend(math_requirements(run["expression"]) if run["type"] in {"inline_math", "math_correction"} else [("text", c) for c in clusters(run["text"]) if not c.isspace()])
                 if include_deleted and run["type"] == "correction":
                     result.extend(("text", c) for c in clusters(run["deleted"]) if not c.isspace())
+                if include_deleted and run["type"] == "math_correction":
+                    result.extend(math_requirements(run["deleted_expression"]))
     return result
 
 
 def visible_requirements(document):
-    """Text/math coverage including deleted phrases; marks are checked by layout."""
+    """Text/math coverage including deleted content; marks are checked by layout."""
     return requirements(document, include_deleted=True)
 
 
@@ -247,5 +257,74 @@ def plain_text(document):
         elif block["type"] == "display_math":
             blocks.append(math_text(block["expression"]))
         else:
-            blocks.append("".join(math_text(r["expression"]) if r["type"] == "inline_math" else r["text"] for r in block["children"]))
+            blocks.append("".join(math_text(r["expression"]) if r["type"] in {"inline_math", "math_correction"} else r["text"] for r in block["children"]))
     return "\n\n".join(blocks)
+
+
+def math_ink_order(expr):
+    """Role-aware painter order for independently checking a math edit ledger."""
+    typ = expr["type"]
+    if typ in {"symbol", "number"}:
+        return math_requirements(expr)
+    if typ == "row":
+        return [item for child in expr["items"] for item in math_ink_order(child)]
+    if typ == "relation":
+        return math_ink_order(expr["left"]) + [("math.operator", expr["operator"])] + math_ink_order(expr["right"])
+    if typ == "fraction":
+        return math_ink_order(expr["numerator"]) + math_ink_order(expr["denominator"]) + [("math.operator", "−")]
+    if typ == "root":
+        return [("math.operator", "√")] + math_ink_order(expr["body"]) + [("math.operator", "−")]
+    if typ in {"superscript", "subscript"}:
+        return math_ink_order(expr["base"]) + math_ink_order(expr["script"])
+    if typ == "function_call":
+        role = "math.variable" if len(clusters(expr["name"])) == 1 else "math.function"
+        result = [(role, c) for c in clusters(expr["name"])] + [("math.operator", "(")]
+        for index, child in enumerate(expr["arguments"]):
+            if index:
+                result.append(("math.operator", ","))
+            result.extend(math_ink_order(child))
+        return result + [("math.operator", ")")]
+    if typ == "limit":
+        result = [("math.function", c) for c in "lim"] + [("math.variable", c) for c in clusters(expr["variable"])]
+        result += [("math.operator", "→")] + math_ink_order(expr["approaches"])
+        if expr["direction"] != "both":
+            result.append(("math.operator", "−" if expr["direction"] == "left" else "+"))
+        return result + math_ink_order(expr["body"])
+    raise AssertionError(typ)
+
+
+def math_restart_fragments(expr):
+    """Proper initial fragments that reuse the expression's existing symbols.
+
+    These are possible unfinished writing attempts, not alternative answers.
+    Complete AST subtrees retain their structure; leaf prefixes remain valid
+    numbers/symbols. A single indivisible symbol has no partial expression.
+    """
+    typ, candidates = expr["type"], []
+    if typ in {"number", "symbol"}:
+        letters = clusters(expr["value"])
+        for stop in range(1, len(letters)):
+            value = "".join(letters[:stop])
+            if typ == "number" and not re.fullmatch(r"[+−-]?\d+(?:\.\d+)?", value, re.ASCII):
+                continue
+            candidates.append({**expr, "value": value})
+    elif typ == "row":
+        candidates = [{"type": "row", "items": expr["items"][:stop]} for stop in range(1, len(expr["items"]))]
+        candidates.extend(math_restart_fragments(expr["items"][0]))
+    elif typ == "relation":
+        candidates = [expr["left"], {"type": "row", "items": [expr["left"],
+            {"type": "symbol", "role": "math.operator", "value": expr["operator"]}]}]
+    elif typ == "fraction":
+        candidates = [expr["numerator"]]
+    elif typ in {"superscript", "subscript"}:
+        candidates = [expr["base"]]
+    elif typ == "root":
+        candidates = [{"type": "symbol", "role": "math.operator", "value": "√"}]
+    elif typ == "function_call":
+        role = "math.variable" if len(clusters(expr["name"])) == 1 else "math.function"
+        candidates = [{"type": "symbol", "role": role, "value": expr["name"]}]
+    elif typ == "limit":
+        candidates = [{"type": "symbol", "role": "math.function", "value": "lim"}]
+    required = Counter(math_requirements(expr))
+    return [copy.deepcopy(candidate) for candidate in candidates
+            if Counter(math_requirements(candidate)) < required]

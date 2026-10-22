@@ -210,7 +210,10 @@ def test_sampled_restarts_are_deterministic_and_require_habit_plus_reviewed_mark
     assert plan["corrections"] and plan == plan_document(document, profile, seed=17)
     for record in plan["corrections"]:
         assert record["kind"] == "sampled_restart"
-        assert record["deleted"] == record["replacement"]
+        assert 0 < len(record["deleted"]) < len(record["replacement"])
+        assert record["replacement"].startswith(record["deleted"])
+        assert record["attempt_basis"] == "estimated_partial_word_restart"
+        assert record["attempt_observed"] is False
         assert record["basis"] == "synthetic_demo" and record["sampled_rate"] == .25
     assert Counter((item["role"], item["text"]) for item in plan["instances"] if item["semantic"]) == Counter(requirements(document))
     assert_inside(plan)
@@ -221,10 +224,11 @@ def test_sampled_restarts_are_deterministic_and_require_habit_plus_reviewed_mark
     assert not plan_document(document, profile)["corrections"]
 
 
-def test_sampled_habit_never_creates_deleted_math(profile):
+def test_math_corrections_can_be_disabled_for_the_document(profile):
     profile = with_mark(profile, .35)
     document = literal_document("")
     document["blocks"] = [{"id": f"math-{i}", "type": "display_math", "expression": {"type": "symbol", "value": "nnnn"}} for i in range(12)]
+    document["handwriting"] = {"corrections": "none"}
     plan = plan_document(document, profile)
     assert not plan["corrections"]
     assert all(item["semantic"] for item in plan["instances"])

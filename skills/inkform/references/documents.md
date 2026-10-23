@@ -107,6 +107,20 @@ height. Graph element IDs are unique within each block. Axes and tick anchors
 must agree. Curves accept `linear` or monotone `smooth` interpolation; smooth
 curves require increasing x. Open and filled markers remain distinct.
 
+Every curve point is an exact anchor by default. For a computed function or
+straight function segment, declare `"point_mode":"samples"` and
+`"anchor_indices":[0, ..., last_index]`. The indices must be increasing and
+include both endpoints. The full `points` array still defines the baseline;
+the listed indices identify values the pen must pass through exactly. Include
+known intercepts, intersections, marked values, and discontinuity endpoints.
+Coordinate extrema and plateau boundaries are also protected by the renderer.
+Horizontal and vertical baselines retain their mathematical meaning while the
+visible pen can carry bounded source deviations between exact anchors.
+Keep source-transcribed data points in the default anchor mode unless their
+meaning has been reviewed. This explicit distinction lets a source stroke
+continue across dense plotting samples instead of restarting at every sample.
+Do not discard points or relax real data anchors merely to add irregularity.
+
 Use `coordinate_kind: qualitative` when the source establishes only a shape,
 not numerical values. Keep those placement coordinates out of asserted answers.
 Labels use the writer's text forms; axes use their reviewed right-arrow forms

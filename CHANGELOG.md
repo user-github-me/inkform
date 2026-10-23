@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.3 — 2026-10-23
+
+- Check character size using letter anatomy, writing context, and neighboring forms before choosing a source variant. Report uncertain measurements and reject clear size mismatches instead of silently restoring unsuitable forms.
+- Distinguish computed curve samples from exact data anchors. Carry reviewed pen deviations across a sampled curve while retaining declared anchors, intersections, and baseline meaning; existing exact-point curves keep their behavior.
+- Verify source-derived sampled curves against the emitted PDF, including bounded hand-drawn horizontal and vertical strokes.
+- Refine the agent workflow to recover the exact source project and profile for an existing PDF, measure local lowercase reference heights, and review every character in its text or mathematical context.
+
 ## 0.4.2 — 2026-10-22
 
 - Group prose letters using actual ink edges, with clear word spaces across paragraphs, graph labels, wrapping, and corrected text. Learn gap medians from reviewed source word/letter boxes and report readability defaults when evidence is missing.

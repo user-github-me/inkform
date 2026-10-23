@@ -56,6 +56,8 @@ class Box:
         result = copy.deepcopy(self)
         for item in result.items:
             item["strokes"] = map_strokes(item["strokes"], lambda px, py: (px + x, py + y))
+            if "baseline_y_mm" in item:
+                item["baseline_y_mm"] += y
             if "graph_plot_anchors_mm" in item:
                 item["graph_plot_anchors_mm"] = [[px+x, py+y] for px, py in item["graph_plot_anchors_mm"]]
             if "body_ink_bounds_mm" in item:
@@ -201,7 +203,8 @@ class Shaper:
             deltas.extend(math.hypot(a[0]-b[0], a[1]-b[1]) for a,b in pairs)
         return max(deltas, default=0) < .42 and sum(deltas)/max(1,len(deltas)) < .24
 
-    def glyph(self, text, role, token_id, size=None, word_id=None, position=0.5, *, context=None, primitive=False):
+    def glyph(self, text, role, token_id, size=None, word_id=None, position=0.5, *, context=None, primitive=False,
+              neighbors=None, neighbor_metrics=None, local_context=None):
         if token_id in self.page_hints:
             self.commit_page(self.page_hints[token_id], [])
         size = self.size if size is None else size
@@ -225,7 +228,9 @@ class Shaper:
             if not forms:
                 raise InkformError("outline_pen_incompatible", "Changing the pen model cannot change a filled outline's thickness; select a reviewed compatible variant.", {"role": role, "text": text, "requested_pen_width_mm": self.profile["pen"]["width_mm"]})
         requested_context = context or self.glyph_context
-        forms,context_selection = self.variant_context.eligible(forms,text,role,requested_context)
+        forms,context_selection = self.variant_context.eligible(forms,text,role,requested_context,
+                                                               neighbors=neighbors,neighbor_metrics=neighbor_metrics,
+                                                               local_context=local_context,size=size)
         if self.variation.observed_only:
             return self.observed_glyph(forms, text, role, token_id, size, word_id or token_id, position, context_selection)
         # Ink identity crosses semantic roles: text x and mathematical x
@@ -279,6 +284,7 @@ class Shaper:
             item = {"token_id": token_id, "glyph_id": source["glyph_id"], "text": text, "role": role,
                     "representation": source["representation"], "strokes": strokes,
                     "pen_width_mm": self.profile["pen"]["width_mm"]*factors["pen_width"], "nominal_size_mm": size,
+                    "baseline_y_mm":size*factors["baseline_x_height"],
                     "source_refs": refs, "semantic": True, "variation": factors}
             item["variation"]["context_selection"] = copy.deepcopy(context_selection)
             descriptor = shape_descriptor(item) if self.variation.amount else None
@@ -355,6 +361,7 @@ class Shaper:
                 "representation": source["representation"],
                 "strokes": map_strokes(source["strokes"], self.variation.transform(source, factors, size)),
                 "pen_width_mm": self.profile["pen"]["width_mm"], "nominal_size_mm": size,
+                "baseline_y_mm":size*factors["baseline_x_height"],
                 "source_refs": copy.deepcopy(source["source_refs"]), "semantic": True, "variation": factors}
         # Keep the same history contract as experimental rendering. It supports
         # page-aware diagnostics, but never causes source paths to be altered.
@@ -416,9 +423,28 @@ class Shaper:
                     # the word audit still prevent repetition.
                     self.used_families[(role, letters[i], size or self.size)] = set()
             result = Box()
+            selected_metrics=[]
             for i, c in enumerate(letters):
                 identity = f"{token_id}:{i}"
-                box = self.glyph(c, role, identity, size, token_id, i / max(1, len(letters) - 1))
+                left,right=i,i+1
+                if c.isalnum():
+                    while left>0 and letters[left-1].isalnum():
+                        left-=1
+                    while right<len(letters) and letters[right].isalnum():
+                        right+=1
+                neighbors=[letters[j] for j in range(left,right) if j!=i]
+                local_context={"word_initial":c.isalpha() and left==i,
+                               "previous_text":letters[i-1] if i else None,
+                               "next_text":letters[i+1] if i+1<len(letters) else None,
+                               "role":role,"nominal_size_mm":size or self.size}
+                box = self.glyph(c, role, identity, size, token_id, i / max(1, len(letters) - 1),
+                                 neighbors=neighbors,neighbor_metrics=[entry for index,entry in selected_metrics if index>=left],
+                                 local_context=local_context)
+                from .variant_context import instance_scale_metric
+                for item in box.items:
+                    metric=instance_scale_metric(item)
+                    if metric:
+                        selected_metrics.append((i,metric))
                 for item in box.items:
                     item.update(word_id=token_id, word_position=i)
                 if role == "text":
@@ -867,6 +893,10 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
     rendered = Counter((item["role"], item["text"]) for item in instances if item.get("semantic", True))
     if len(set(token_ids)) != len(token_ids) or rendered != expected:
         raise InkformError("content_accounting_failed", "The shaped geometry must account for every required symbol in its exact role.", {"required": len(needed), "rendered": len(instances), "missing": [{"role": role, "text": text, "count": count} for (role, text), count in (expected - rendered).items()], "unexpected": [{"role": role, "text": text, "count": count} for (role, text), count in (rendered - expected).items()]})
+    from .variant_context import audit_context_sizes
+    context_size_audit=audit_context_sizes(instances)
+    if context_size_audit["errors"]:
+        raise InkformError("context_size_mismatch", "Placed writing has a clear size mismatch with its writing context.", context_size_audit)
     geometry_hash = hashlib.sha256(json.dumps(instances, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
     spacing = {**copy.deepcopy(shaper.spacing), "version": "inkform-ink-clearance-2",
                "letter_placement": "body_band_with_verified_complete_2d_ink_clearance",
@@ -875,7 +905,7 @@ def _plan_document_once(document, profile, seed=72, mode=None, nonces=None, page
                "fallback_letter_gap_xheight": .12, "fallback_word_gap_xheight": 1.2,
                "minimum_word_gap_xheight": .9, "minimum_word_to_letter_gap_ratio": 3,
                "source_paths_changed": False}
-    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "graphs": getattr(shaper, "graphs", []), "spacing": spacing, "variation": {"version": "inkform-occurrence-3", "mode": shaper.variation.mode, "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}, "source_usage": _source_usage(instances, shaper)}
+    return {"document_id": document["document_id"], "content_mode": document["content_mode"], "unresolved_inputs": copy.deepcopy(document.get("unresolved_inputs", [])), "content_status": "partial" if document.get("unresolved_inputs") else "complete", "page": {"width_mm": width, "height_mm": height, "margins_mm": margins, "body_x_height_mm": size}, "page_count": page_index + 1, "instances": instances, "lines": lines, "geometry_hash": geometry_hash, "required_symbol_count": len(needed), "rendered_symbol_count": sum(rendered.values()), "visible_symbol_count": len(instances), "coverage": cov, "visible_coverage": visible_cov, "corrections": shaper.corrections, "graphs": getattr(shaper, "graphs", []), "spacing": spacing, "context_size_audit":context_size_audit, "variation": {"version": "inkform-occurrence-3", "mode": shaper.variation.mode, "amount": shaper.variation.amount, "estimated_axes_are_not_learned_dynamics": True}, "source_usage": _source_usage(instances, shaper)}
 
 
 def _source_usage(instances, shaper):

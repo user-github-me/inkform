@@ -1,10 +1,21 @@
 # Rendering and checking
 
 ```sh
-inkform profile coverage personal-default --document document.json
-inkform render document.json --profile personal-default --seed 72 --paper A4 --output build/notes.pdf
+WRITER_PROFILE="/absolute/path/to/the/project/frozen/profile.json"
+inkform profile coverage "$WRITER_PROFILE" --document document.json
+inkform render document.json --profile "$WRITER_PROFILE" --seed 72 --paper A4 --output build/notes.pdf
 inkform check build/notes.pdf --manifest build/notes.build.json
 ```
+
+For an existing document, resolve that frozen profile from its verified build
+manifest. Role coverage inventories available characters; it does not establish
+that their sizes fit every word or mathematical context. Render a representative
+section with the actual profile, then inspect each instance's
+`variation.context_selection`, including anatomy, local context, exclusions,
+and measurement warnings. Check capitals beside body letters, whole numbers,
+function names, graph labels, exponents, and subscripts at the emitted size.
+Resolve clear gaps from source evidence before a full build. Marginal geometric
+estimates still need visual review; they do not prove that unusual writing is wrong.
 
 `fresh_strokes` requires reviewed centerlines. `clean_outline` requires reviewed closed outlines at a compatible physical size and nominal pen calibration, including separately calibrated script sizes. Expandable bars and radicals use reviewed `−` and `√` centerlines alongside the outline body. Rendering never reads a source bitmap. Missing coverage and layout overflow return structured errors with exit code 2, before replacing the deliverable.
 

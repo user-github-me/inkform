@@ -15,6 +15,14 @@ from .errors import InkformError
 CONTEXTS = {"body", "capital", "baseline_digit", "superscript", "subscript"}
 SCRIPT_CONTEXTS = {"superscript", "subscript"}
 NORMALIZATIONS = {"body_xheight", "context_xheight"}
+PREFERRED_HEIGHT_RATIO_BOUNDS = (.72, 1.5)
+CLEAR_HEIGHT_RATIO_BOUNDS = (.65, 1.8)
+LATIN_CAPITALS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+BODY_LETTERS = frozenset("acegijmnopqrsuvwxyz")
+ASCENDER_LETTERS = frozenset("bdfhklt")
+# f and t have particularly variable upper extensions; their own source
+# forms remain usable, but they do not establish the capital/stem scale.
+ASCENDER_REFERENCES = frozenset("bdhkl")
 
 
 def natural_context(text, role):
@@ -88,12 +96,115 @@ def _height(glyph):
     return value if math.isfinite(value) and value > 1e-8 else None
 
 
+def anatomy_context(text, natural):
+    if natural == "body":
+        if text in BODY_LETTERS:
+            return "body_xheight"
+        if text in ASCENDER_LETTERS:
+            return "ascender"
+    return natural
+
+
+def _upper_extent(glyph, baseline=0., size=1.):
+    """Ink above the source baseline, without counting a descender or dot.
+
+    This is an estimate of the vertical writing zone, not a glyph bounding
+    box or a requirement that different anatomical classes be equally tall.
+    The baseline-connected stem of i/j is measured separately from its dot.
+    """
+    from .profiles import geometry_bounds
+    bounds = [geometry_bounds([stroke]) for stroke in glyph["strokes"]]
+    if glyph["text"] in {"i", "j"}:
+        connected={index for index,box in enumerate(bounds) if box[3] >= baseline-.25*size}
+        if connected:
+            # Export can split one variable-width stem into short path paints.
+            # Follow touching endpoints so this representation change does
+            # not turn its upper fragments into a purported detached dot.
+            endpoints=[[stroke["start"],*[segment["end"] for segment in stroke["segments"]]] for stroke in glyph["strokes"]]
+            remaining=set(range(len(bounds)))-connected
+            while remaining:
+                points=[point for index in connected for point in endpoints[index]]
+                found={index for index in remaining if any(math.dist(point,other)<=.03*size
+                                                          for point in endpoints[index] for other in points)}
+                if not found:
+                    break
+                connected.update(found)
+                remaining.difference_update(found)
+            bounds=[bounds[index] for index in connected]
+    value = baseline-min((box[1] for box in bounds), default=baseline)
+    return value if math.isfinite(value) and value > 1e-8 else None
+
+
+def instance_scale_metric(item):
+    """Measure emitted ink in its semantic size and translated baseline."""
+    category=anatomy_context(item["text"],natural_context(item["text"],item["role"]))
+    size=item.get("nominal_size_mm")
+    if not size or category not in {"capital","body_xheight","ascender","baseline_digit"}:
+        return None
+    if category=="baseline_digit":
+        height=_height(item)
+    else:
+        baseline=item.get("baseline_y_mm")
+        if baseline is None:
+            return None
+        height=_upper_extent(item,baseline,size)
+    if height is None:
+        return None
+    return {"text":item["text"],"anatomy":category,"height_mm":height,"height_xheight":height/size}
+
+
+def _strong_reference(category, basis, count):
+    if category=="capital" and basis=="peer_character_median":
+        return False
+    return ((basis in {"peer_character_median","ascender_character_median"} and count>=3)
+            or (basis in {"neighbor_character_median","neighbor_ascender_median"} and count>=2))
+
+
+def audit_context_sizes(instances, *, tolerance_mm=.0002):
+    """Check placed ink against the context used to select each source form."""
+    result={"version":"inkform-context-size-audit-1","tolerance_mm":tolerance_mm,"checked_glyph_count":0,
+            "without_comparable_reference":0,"marks_and_symbols_skipped":0,
+            "errors":[],"warnings":[]}
+    for item in instances:
+        metric=instance_scale_metric(item)
+        if metric is None:
+            result["marks_and_symbols_skipped"]+=1
+            continue
+        context=item.get("variation",{}).get("context_selection",{})
+        reference=context.get("height_reference_xheight")
+        if not reference:
+            result["without_comparable_reference"]+=1
+            continue
+        result["checked_glyph_count"]+=1
+        ratio=metric["height_xheight"]/reference
+        record={"token_id":item.get("token_id"),"glyph_id":item.get("glyph_id"),
+                "text":item["text"],"role":item["role"],"page":item.get("page"),
+                "anatomy":metric["anatomy"],"requested_context":context.get("requested"),
+                "height_mm":metric["height_mm"],"reference_height_mm":reference*item["nominal_size_mm"],
+                "height_ratio":ratio,"reference_basis":context.get("height_reference_basis")}
+        clear_reference=context.get("clear_height_reference_xheight")
+        if clear_reference:
+            clear_ratio=metric["height_xheight"]/clear_reference
+            low,high=context["clear_height_ratio_bounds"]
+            epsilon=tolerance_mm/(clear_reference*item["nominal_size_mm"])
+            if not low-epsilon <= clear_ratio <= high+epsilon:
+                result["errors"].append({**record,"code":"placed_ink_context_size_mismatch",
+                                         "clear_height_ratio":clear_ratio})
+                continue
+        low,high=context.get("height_ratio_bounds",PREFERRED_HEIGHT_RATIO_BOUNDS)
+        epsilon=tolerance_mm/(reference*item["nominal_size_mm"])
+        if not low-epsilon <= ratio <= high+epsilon:
+            result["warnings"].append({**record,"code":"placed_ink_outside_preferred_height_range"})
+    return result
+
+
 class VariantContext:
     def __init__(self, forms, observations, sources):
         self.observations = observations
         self.sources = {source["source_id"]:source for source in sources}
         self.heights = {}
-        self.by_category = {"capital": {}, "baseline_digit": {}}
+        self.scale_heights = {}
+        self.by_category = {"capital": {}, "baseline_digit": {}, "body_xheight": {}, "ascender": {}}
         seen = set()
         for candidates in forms.values():
             for glyph in candidates:
@@ -102,37 +213,65 @@ class VariantContext:
                     continue
                 seen.add(identity)
                 self.heights[identity] = _height(glyph)
+                natural = natural_context(glyph["text"],glyph["role"])
+                category = anatomy_context(glyph["text"],natural)
+                self.scale_heights[identity] = (_upper_extent(glyph) if category in {"capital","body_xheight","ascender"}
+                                                else self.heights[identity])
                 if glyph.get("derivation"):
                     continue
-                category = natural_context(glyph["text"],glyph["role"])
                 context = source_context(glyph,observations,self.sources)
-                if category not in self.by_category or (context and context["kind"] != category):
+                if category not in self.by_category or (context and context["kind"] != natural):
                     continue
-                height = self.heights[identity]
+                height = self.scale_heights[identity]
                 if height is not None:
                     self.by_category[category].setdefault(glyph["text"], []).append(height)
 
-    def _reference(self, forms, text, natural):
+    def _reference(self, forms, text, natural, neighbors=None, neighbor_metrics=None):
         # Give each different character one vote; plentiful aliases of one
         # label do not establish the writer's capital/digit scale.
-        peers = [median(heights) for label,heights in self.by_category.get(natural,{}).items() if label != text]
+        category = anatomy_context(text,natural)
+        reference_category = "ascender" if category=="ascender" or (category=="capital" and text in LATIN_CAPITALS) else category
+        selected_neighbors={}
+        for item in neighbor_metrics or []:
+            if (item["anatomy"]==reference_category and item["text"]!=text
+                    and (reference_category!="ascender" or item["text"] in ASCENDER_REFERENCES)):
+                selected_neighbors.setdefault(item["text"],[]).append(item["height_xheight"])
+        if selected_neighbors:
+            return median(median(values) for values in selected_neighbors.values()), "selected_neighbor_median", len(selected_neighbors)
+        pool = {label:heights for label,heights in self.by_category.get(reference_category,{}).items()
+                if label != text and (reference_category != "ascender" or label in ASCENDER_REFERENCES)}
+        local = [median(heights) for label,heights in pool.items() if label in set(neighbors or [])]
+        if len(local) >= 2:
+            basis = "neighbor_ascender_median" if reference_category=="ascender" else "neighbor_character_median"
+            return median(local), basis, len(local)
+        peers = [median(heights) for heights in pool.values()]
         if len(peers) >= 3:
-            return median(peers), "peer_character_median", len(peers)
-        heights = [self.heights.get(glyph["glyph_id"]) for glyph in forms]
+            basis = "ascender_character_median" if reference_category=="ascender" else "peer_character_median"
+            return median(peers), basis, len(peers)
+        if category=="capital":
+            peers = [median(heights) for label,heights in self.by_category["capital"].items() if label != text]
+            if len(peers) >= 3:
+                return median(peers), "peer_character_median", len(peers)
+        heights = [self.scale_heights.get(glyph["glyph_id"]) for glyph in forms]
         heights = [height for height in heights if height is not None]
         if len(heights) >= 3:
             return median(heights), "same_character_median", len(heights)
         return None, "insufficient_comparable_geometry", len(heights)
 
-    def eligible(self, forms, text, role, requested=None):
+    def eligible(self, forms, text, role, requested=None, *, neighbors=None, neighbor_metrics=None, local_context=None, size=None):
         natural = natural_context(text,role)
+        category = anatomy_context(text,natural)
         requested = requested or natural
         diagnostic = {"version":"inkform-variant-context-1", "requested":requested,
                       "basis":"legacy_unclassified", "candidate_count":len(forms),
                       "eligible_count":len(forms), "excluded":[], "fallback":None,
                       "geometry_action":"selection_only"}
+        if local_context is not None:
+            diagnostic["local_context"] = dict(local_context)
         if requested not in CONTEXTS or natural is None:
             return forms,diagnostic
+        diagnostic["anatomy"] = category
+        diagnostic["height_metric"] = "baseline_to_upper_ink" if category in {"capital","body_xheight","ascender"} else "ink_height"
         annotations = {glyph["glyph_id"]:source_context(glyph,self.observations,self.sources) for glyph in forms}
         selected, excluded = [], []
         if requested in SCRIPT_CONTEXTS:
@@ -166,29 +305,72 @@ class VariantContext:
             selected=compatible
             if reviewed:
                 diagnostic["basis"]="reviewed_source_context"
-            reference,basis,count=self._reference(compatible,text,natural)
+            reference,basis,count=self._reference(compatible,text,natural,neighbors,neighbor_metrics)
             if reference is not None:
-                acceptable=[g for g in compatible if annotations[g["glyph_id"]] or (
-                    self.heights.get(g["glyph_id"]) is not None and .72*reference <= self.heights[g["glyph_id"]] <= 1.5*reference)]
+                # A reviewed context identifies where the sample was written;
+                # it does not certify that its normalized size matches this
+                # bank. Supported letter anatomy also needs the comparison.
+                require_height = category in self.by_category
+                low,high=PREFERRED_HEIGHT_RATIO_BOUNDS
+                acceptable=[g for g in compatible if (annotations[g["glyph_id"]] and not require_height) or (
+                    self.scale_heights.get(g["glyph_id"]) is not None and low*reference <= self.scale_heights[g["glyph_id"]] <= high*reference)]
+                # A chosen neighbor improves local coherence, but cannot make
+                # a clearly miscalibrated source pass an independent bank check.
+                clear_reference,clear_basis,clear_count=self._reference(compatible,text,natural)
+                if not _strong_reference(category,clear_basis,clear_count):
+                    clear_reference,clear_basis,clear_count=reference,basis,count
+                clear_supported=require_height and _strong_reference(category,clear_basis,clear_count)
+                clear_candidates=compatible
+                if clear_supported:
+                    low,high=CLEAR_HEIGHT_RATIO_BOUNDS
+                    clear_candidates=[g for g in compatible if self.scale_heights.get(g["glyph_id"]) is not None
+                                      and low*clear_reference <= self.scale_heights[g["glyph_id"]] <= high*clear_reference]
+                    acceptable=[g for g in acceptable if g in clear_candidates]
                 diagnostic.update(height_reference_xheight=reference,height_reference_basis=basis,
-                                  height_reference_count=count,height_ratio_bounds=[.72,1.5])
-                if acceptable:
-                    for glyph in compatible:
-                        if glyph not in acceptable:
-                            excluded.append({"glyph_id":glyph["glyph_id"],"reason":"estimated_height_incompatible",
-                                             "height_xheight":self.heights.get(glyph["glyph_id"])})
-                    selected=acceptable
-                    if len(acceptable)!=len(compatible) or diagnostic["basis"]!="reviewed_source_context":
-                        diagnostic["basis"]="estimated_geometry_context"
-                else:
-                    diagnostic["fallback"]="no_comparable_height_candidate; preserve existing source forms"
+                                  height_reference_count=count,height_ratio_bounds=list(PREFERRED_HEIGHT_RATIO_BOUNDS))
+                if size is not None:
+                    diagnostic["height_reference_mm"] = reference*size
+                if clear_supported:
+                    diagnostic.update(clear_height_ratio_bounds=list(CLEAR_HEIGHT_RATIO_BOUNDS),
+                                      clear_height_reference_xheight=clear_reference,
+                                      clear_height_reference_basis=clear_basis,
+                                      clear_height_reference_count=clear_count)
+                selected=acceptable
+                reason="estimated_height_incompatible"
+                if not acceptable:
+                    selected=compatible
+                    # The preferred band is an estimate, not ground truth.
+                    # Marginal differences do not make a bank unusable. Clear
+                    # outliers need evidence from distinct comparable letters
+                    # or digits, rather than another alias of the same crop.
+                    if clear_supported:
+                        selected=clear_candidates
+                        reason="estimated_height_clearly_incompatible"
+                    if selected:
+                        diagnostic["fallback"]="no_candidate_in_preferred_height_range; preserve source forms within the available evidence"
+                        diagnostic["warnings"]=[{"code":"estimated_height_outside_preferred_range",
+                                                 "glyph_id":g["glyph_id"],
+                                                 "height_ratio":self.scale_heights[g["glyph_id"]]/reference
+                                                     if self.scale_heights.get(g["glyph_id"]) is not None else None}
+                                                for g in selected]
+                for glyph in compatible:
+                    if glyph not in selected:
+                        entry={"glyph_id":glyph["glyph_id"],"reason":reason,
+                               "height_xheight":self.scale_heights.get(glyph["glyph_id"])}
+                        annotation=annotations[glyph["glyph_id"]]
+                        if annotation:
+                            entry["source_context"]=annotation["kind"]
+                        excluded.append(entry)
+                if len(selected)!=len(compatible) or diagnostic["basis"]!="reviewed_source_context":
+                    diagnostic["basis"]="estimated_geometry_context"
             elif diagnostic["basis"]!="reviewed_source_context":
                 diagnostic["fallback"]=diagnostic["fallback"] or "insufficient_comparable_geometry; preserve existing source forms"
-        if not selected:
-            raise InkformError("missing_context_compatible_glyph",
-                "The available reviewed forms belong to another writing context or need an unsupported script normalization.",
-                {"role":role,"text":text,"requested_context":requested,"excluded":excluded,
-                 "needed":"a reviewed ordinary form or a matching script form normalized to context_xheight"})
         diagnostic["excluded"]=excluded
         diagnostic["eligible_count"]=len(selected)
+        if not selected:
+            raise InkformError("missing_context_compatible_glyph",
+                "No source form has a compatible writing context, normalization and comparable size.",
+                {"role":role,"text":text,"requested_context":requested,"excluded":excluded,
+                 "context_selection":diagnostic,
+                 "needed":"an ordinary source form at a comparable size or a matching script form normalized to context_xheight"})
         return selected,diagnostic

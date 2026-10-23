@@ -7,7 +7,7 @@ import pytest
 from inkform.errors import InkformError
 from inkform.layout import Shaper, map_strokes
 from inkform.profiles import geometry_bounds, load_profile
-from inkform.variant_context import validate_source_context
+from inkform.variant_context import audit_context_sizes, instance_scale_metric, validate_source_context
 
 
 @pytest.fixture
@@ -72,9 +72,284 @@ def test_capital_uses_peer_capital_height_without_changing_case_or_contour(profi
         assert item["variation"]["context_selection"]["requested"]=="capital"
 
 
-def test_legitimate_observed_variants_remain_balanced_and_deterministic(profile):
+@pytest.mark.parametrize("text,role,kind",[("6","math.digit","baseline_digit"),("G","text","capital")])
+@pytest.mark.parametrize("annotation_location",["observation","glyph"])
+def test_reviewed_ordinary_context_does_not_exempt_a_tiny_form_from_size_selection(profile,text,role,kind,annotation_location):
+    tiny=donor(profile,text,role,.5,"reviewed-tiny-form")
+    observation=annotate(profile,tiny,kind,"body_xheight")
+    if annotation_location=="glyph":
+        tiny["source_context"]=observation.pop("source_context")
+    validate_source_context(profile)
+    before=copy.deepcopy(profile)
+    shape=writer(profile)
+    for index in range(6):
+        item=shape.glyph(text,role,f"reviewed-{index}").items[0]
+        assert item["glyph_id"]!=tiny["glyph_id"]
+        diagnostic=item["variation"]["context_selection"]
+        assert diagnostic["basis"]=="estimated_geometry_context"
+        assert diagnostic["excluded"][0]["reason"]=="estimated_height_incompatible"
+        assert diagnostic["excluded"][0]["source_context"]==kind
+    assert profile==before
+
+
+@pytest.mark.parametrize("reviewed",[False,True])
+@pytest.mark.parametrize("context",[None,"superscript","subscript"])
+def test_tiny_only_digit_bank_cannot_restore_incompatible_forms_when_peers_establish_scale(profile,reviewed,context):
+    # Reproduce the concise assignment's three small sixes: each is around
+    # 57–62% of the other digits, so their own median is not a useful reference.
+    small=[donor(profile,scale=scale,name=f"small-six-{index}")
+           for index,scale in enumerate((.569,.62,.571))]
+    profile["glyphs"]=[g for g in profile["glyphs"] if g["text"]!="6" or g in small]
+    if reviewed:
+        for glyph in small:
+            annotate(profile,glyph,"baseline_digit","body_xheight")
+    shape=writer(profile)
+    with pytest.raises(InkformError) as error:
+        shape.glyph("6","math.digit","incompatible-six",context=context)
+    assert error.value.code=="missing_context_compatible_glyph"
+    diagnostic=error.value.details["context_selection"]
+    assert diagnostic["height_reference_basis"]=="peer_character_median"
+    assert diagnostic["height_reference_count"]>=3
+    assert diagnostic["clear_height_ratio_bounds"]==[.65,1.8]
+    assert diagnostic["eligible_count"]==0
+    assert {entry["glyph_id"] for entry in diagnostic["excluded"]}=={glyph["glyph_id"] for glyph in small}
+    assert all(entry["reason"]=="estimated_height_clearly_incompatible" for entry in diagnostic["excluded"])
+
+
+@pytest.mark.parametrize("text,role,kind,ratio",[("9","math.digit","baseline_digit",.706),("V","text","capital",.568)])
+def test_outside_preferred_height_range_does_not_make_marginal_digits_or_unusual_capitals_unusable(profile,text,role,kind,ratio):
+    if kind=="capital":
+        # A capital-only bank cannot establish the ordinary ascender scale;
+        # this sparse legacy case still has no independent anatomy evidence.
+        profile["glyphs"]=[g for g in profile["glyphs"] if g["text"] not in "bdhkl"]
+    shape=writer(profile)
+    forms=shape.forms[(role,text)]
+    reference,_,_=shape.variant_context._reference(forms,text,kind)
+    scale=ratio*reference/shape.variant_context.scale_heights[forms[0]["glyph_id"]]
+    only=donor(profile,text,role,scale,"unusual-source-form")
+    profile["glyphs"]=[g for g in profile["glyphs"] if g["text"]!=text or g is only]
+    item=writer(profile).glyph(text,role,"unusual-form").items[0]
+    diagnostic=item["variation"]["context_selection"]
+    assert item["glyph_id"]==only["glyph_id"]
+    assert "no_candidate_in_preferred_height_range" in diagnostic["fallback"]
+    assert diagnostic["excluded"]==[]
+    assert diagnostic["warnings"]==[{"code":"estimated_height_outside_preferred_range",
+                                    "glyph_id":only["glyph_id"],"height_ratio":pytest.approx(ratio)}]
+    assert relative(item["strokes"])==relative(map_strokes(only["strokes"],lambda x,y:(x*3,y*3)))
+
+
+def test_word_initial_capital_uses_ascenders_when_capital_bank_is_undersized(profile):
+    ordinary=donor(profile,"H","text",1.,"ordinary-h")
+    for glyph in profile["glyphs"]:
+        if glyph["text"].isupper() and glyph is not ordinary:
+            glyph["strokes"]=map_strokes(glyph["strokes"],lambda x,y:(x*.6,y*.6))
+            glyph["ink_bounds"]=geometry_bounds(glyph["strokes"])
+    annotate(profile,ordinary,"capital","body_xheight")
+    item=writer(profile).text("Half","text","half").items[0]
+    assert item["glyph_id"]==ordinary["glyph_id"]
+    diagnostic=item["variation"]["context_selection"]
+    assert diagnostic["height_reference_basis"]=="ascender_character_median"
+    assert diagnostic["height_metric"]=="baseline_to_upper_ink"
+    assert diagnostic["local_context"]["word_initial"] is True
+    assert diagnostic["local_context"]["next_text"]=="a"
+    assert diagnostic["local_context"]["role"]=="text"
+
+
+def test_missing_normal_capital_is_reported_before_word_emission(profile):
+    small=donor(profile,"H","text",.6,"only-short-h")
+    profile["glyphs"]=[g for g in profile["glyphs"] if g["text"]!="H" or g is small]
+    with pytest.raises(InkformError) as error:
+        writer(profile).text("Half","text","half")
+    diagnostic=error.value.details["context_selection"]
+    assert error.value.code=="missing_context_compatible_glyph"
+    assert diagnostic["anatomy"]=="capital"
+    assert diagnostic["height_reference_basis"]=="ascender_character_median"
+    assert diagnostic["local_context"]["word_initial"] is True
+    assert diagnostic["eligible_count"]==0
+
+
+def test_local_lowercase_neighbors_filter_a_form_that_global_body_range_allows(profile):
+    small=donor(profile,"a","text",.75,"short-a")
+    for text in "ce":
+        source=donor(profile,text,"text",1.2,"large-"+text)
+        profile["glyphs"]=[g for g in profile["glyphs"] if g["text"]!=text or g is source]
+    shape=writer(profile)
+    global_forms,_=shape.variant_context.eligible(shape.forms[("text","a")],"a","text")
+    assert small in global_forms
+    for index in range(3):
+        item=shape.text("ace","text",f"local-{index}").items[0]
+        assert item["glyph_id"]!=small["glyph_id"]
+        diagnostic=item["variation"]["context_selection"]
+        assert diagnostic["height_reference_basis"]=="neighbor_character_median"
+        assert diagnostic["height_reference_count"]==2
+        assert diagnostic["height_reference_mm"]==pytest.approx(3*diagnostic["height_reference_xheight"])
+        assert item["text"]=="a" and diagnostic["local_context"]["word_initial"]
+
+
+def test_descenders_and_detached_dots_do_not_define_lowercase_body_size(profile):
+    for text in "gij":
+        glyph=next(g for g in profile["glyphs"] if g["text"]==text and g["role"]=="text")
+        if text=="g":
+            glyph["strokes"]=map_strokes(glyph["strokes"],lambda x,y:(x,y*4 if y>0 else y))
+        else:
+            # An authored detached dot far above the body must not make the
+            # stem ineligible or cause a smaller stem to be selected.
+            glyph["strokes"].append({"start":[.2,-3.],"segments":[{"type":"line","end":[.2,-3.05]}]})
+        glyph["ink_bounds"]=geometry_bounds(glyph["strokes"])
+    shape=writer(profile)
+    for text in "gij":
+        item=shape.glyph(text,"text",text).items[0]
+        diagnostic=item["variation"]["context_selection"]
+        assert diagnostic["anatomy"]=="body_xheight"
+        assert diagnostic["excluded"]==[]
+        assert item["variation"]["source_shape_preserved"]
+
+
+def test_body_and_ascender_anatomy_keep_script_scale_and_literal_case(profile):
+    shape=writer(profile)
+    ordinary=shape.text("Halfgij","text","body").items
+    previous=shape.glyph_context
+    shape.glyph_context="superscript"
+    script=shape.text("Halfgij","text","script",size=2.04).items
+    shape.glyph_context=previous
+    assert "".join(item["text"] for item in ordinary)=="Halfgij"
+    assert "".join(item["text"] for item in script)=="Halfgij"
+    assert all(item["nominal_size_mm"]==2.04 for item in script)
+    assert all(item["variation"]["context_selection"]["requested"]=="superscript" for item in script)
+    for base,sup in zip(ordinary,script):
+        b=geometry_bounds(base["strokes"]);s=geometry_bounds(sup["strokes"])
+        assert s[3]-s[1]==pytest.approx((b[3]-b[1])*.68)
+
+
+def test_actual_selected_neighbors_keep_body_sizes_coherent(profile):
+    for text in "ac":
+        small=donor(profile,text,"text",.85,"small-"+text)
+        large=donor(profile,text,"text",1.35,"large-"+text)
+        profile["glyphs"]=[g for g in profile["glyphs"] if g["text"]!=text or g in (small,large)]
+    shape=writer(profile)
+    for index in range(6):
+        first,second=shape.text("ac","text",f"pair-{index}").items
+        a,b=instance_scale_metric(first),instance_scale_metric(second)
+        assert .72 <= b["height_mm"]/a["height_mm"] <= 1.5
+        assert second["variation"]["context_selection"]["height_reference_basis"]=="selected_neighbor_median"
+
+
+def test_small_neighbor_cannot_override_clear_independent_digit_scale(profile):
+    small=donor(profile,scale=.5,name="only-tiny-six")
+    profile["glyphs"]=[g for g in profile["glyphs"] if g["text"]!="6" or g is small]
+    shape=writer(profile)
+    with pytest.raises(InkformError) as error:
+        shape.variant_context.eligible(shape.forms[("math.digit","6")],"6","math.digit",
+            neighbor_metrics=[{"text":"1","anatomy":"baseline_digit","height_xheight":.6,"height_mm":1.8}])
+    diagnostic=error.value.details["context_selection"]
+    assert diagnostic["height_reference_basis"]=="selected_neighbor_median"
+    assert diagnostic["clear_height_reference_basis"]=="peer_character_median"
+    assert diagnostic["eligible_count"]==0
+
+
+def test_emitted_size_metrics_follow_baseline_translation(profile):
+    box=writer(profile).text("Agij","text","metrics",size=2.04)
+    moved=box.shifted(15,120)
+    for first,second in zip(box.items,moved.items):
+        a,b=instance_scale_metric(first),instance_scale_metric(second)
+        assert b["height_mm"]==pytest.approx(a["height_mm"])
+        assert b["height_xheight"]==pytest.approx(a["height_xheight"])
+        assert second["baseline_y_mm"]==pytest.approx(first["baseline_y_mm"]+120)
+
+
+def test_placed_ink_audit_checks_actual_size_and_respects_scripts_and_marks(profile):
+    shape=writer(profile)
+    box=shape.text("Halfgij.","text","audit",size=2.04).shifted(10,75)
+    before=audit_context_sizes(box.items)
+    assert before["checked_glyph_count"]==7
+    assert before["marks_and_symbols_skipped"]==1
+    assert before["errors"]==[]
+    capital=box.items[0]
+    baseline=capital["baseline_y_mm"]
+    capital["strokes"]=map_strokes(capital["strokes"],lambda x,y:(x,baseline+(y-baseline)*.4))
+    after=audit_context_sizes(box.items)
+    assert len(after["errors"])==1
+    assert after["errors"][0]["token_id"]==capital["token_id"]
+    assert after["errors"][0]["code"]=="placed_ink_context_size_mismatch"
+
+
+def test_pdf_context_size_audit_measures_emitted_paths_and_rejects_a_shrunken_capital(profile,tmp_path):
+    import hashlib
+    from inkform.document import literal_document
+    from inkform.layout import plan_document
+    from inkform.rendering import export_pdf
+    from inkform.validation import check_pdf
+    for glyph in profile["glyphs"]:
+        if glyph["text"]=="i":
+            for stroke in glyph["strokes"]:
+                stroke["width_profile"]=[{"s":0,"multiplier":.8},{"s":.5,"multiplier":1.2},{"s":1,"multiplier":.8}]
+    plan=plan_document(literal_document("Half-life"),profile)
+    pdf=tmp_path/"normal.pdf"
+    export_pdf(plan,profile,pdf,"normal")
+    plan["pdf_sha256"]=hashlib.sha256(pdf.read_bytes()).hexdigest()
+    normal=check_pdf(pdf,plan,preview_dpi=36)
+    assert normal["ok"],normal["errors"]
+    assert normal["checks"]["context_sizes"]=="pass"
+    assert normal["context_size_audit"]["geometry_source"]=="emitted_pdf_vector_paths"
+    assert normal["context_size_audit"]["checked_glyph_count"]==8
+    changed=copy.deepcopy(plan)
+    capital=next(item for item in changed["instances"] if item["text"]=="H")
+    baseline=capital["baseline_y_mm"]
+    capital["strokes"]=map_strokes(capital["strokes"],lambda x,y:(x,baseline+(y-baseline)*.4))
+    tampered=tmp_path/"tiny-h.pdf"
+    export_pdf(changed,profile,tampered,"tiny h")
+    plan["pdf_sha256"]=hashlib.sha256(tampered.read_bytes()).hexdigest()
+    # Retain the original passing sidecar audit while changing actual PDF ink.
+    report=check_pdf(tampered,plan,preview_dpi=36)
+    assert not report["ok"]
+    assert plan["context_size_audit"]["errors"]==[]
+    assert report["checks"]["context_sizes"]=="fail"
+    assert report["context_size_audit"]["errors"][0]["text"]=="H"
+    assert "context_size_mismatch" in {entry["code"] for entry in report["errors"]}
+
+
+@pytest.mark.parametrize("text",["a","l","g","i"])
+def test_body_and_ascender_selection_excludes_tiny_sources_with_only_two_forms(profile,text):
+    small=donor(profile,text,"text",.45,"small-"+text)
+    shape=writer(profile)
+    for index in range(3):
+        item=shape.glyph(text,"text",f"letter-{index}").items[0]
+        assert item["glyph_id"]!=small["glyph_id"]
+        assert item["variation"]["context_selection"]["excluded"][0]["glyph_id"]==small["glyph_id"]
+
+
+def test_marginal_digit_fallback_does_not_restore_a_clearly_tiny_alternative(profile):
+    tiny=donor(profile,scale=.5,name="clearly-tiny-six")
+    marginal=donor(profile,scale=.7,name="marginal-six")
+    profile["glyphs"]=[g for g in profile["glyphs"] if g["text"]!="6" or g in (tiny,marginal)]
+    item=writer(profile).glyph("6","math.digit","fallback-six").items[0]
+    assert item["glyph_id"]==marginal["glyph_id"]
+    diagnostic=item["variation"]["context_selection"]
+    assert diagnostic["excluded"][0]["glyph_id"]==tiny["glyph_id"]
+    assert diagnostic["excluded"][0]["reason"]=="estimated_height_clearly_incompatible"
+    assert diagnostic["warnings"][0]["glyph_id"]==marginal["glyph_id"]
+
+
+def test_script_fallback_checks_ordinary_source_size_before_one_layout_reduction(profile):
+    tiny=donor(profile,scale=.5,name="reviewed-tiny-six")
+    annotate(profile,tiny,"baseline_digit","body_xheight")
+    shape=writer(profile)
+    for context in ("superscript","subscript"):
+        item=shape.glyph("6","math.digit",context,size=2.04,context=context).items[0]
+        assert item["glyph_id"]!=tiny["glyph_id"]
+        source=next(g for g in profile["glyphs"] if g["glyph_id"]==item["glyph_id"])
+        assert relative(item["strokes"])==relative(map_strokes(source["strokes"],lambda x,y:(x*2.04,y*2.04)))
+        assert item["nominal_size_mm"]==2.04
+
+
+@pytest.mark.parametrize("reviewed",[False,True])
+def test_legitimate_observed_variants_remain_balanced_and_deterministic(profile,reviewed):
     donor(profile,scale=.9,name="normal-six-b")
     donor(profile,scale=1.1,name="normal-six-c")
+    if reviewed:
+        for glyph in profile["glyphs"]:
+            if glyph["text"]=="6" and glyph["role"]=="math.digit":
+                annotate(profile,glyph,"baseline_digit","body_xheight")
     first,second=writer(profile,12),writer(profile,12)
     one=[first.glyph("6","math.digit",f"six-{i}").items[0] for i in range(6)]
     two=[second.glyph("6","math.digit",f"six-{i}").items[0] for i in range(6)]

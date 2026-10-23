@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 
 from inkform.graphs import graph_box, validate_graph_style
-from inkform.graph_traces import path_samples, trace_candidates
+from inkform.graph_traces import path_samples, sampled_curve_protected_indices, trace_candidates
 from inkform.layout import Shaper, plan_document
 from inkform.profiles import load_profile
 from inkform.rendering import export_pdf, render_document
@@ -162,3 +162,172 @@ def test_pdf_and_matching_manifest_cannot_replace_reviewed_source_geometry(tmp_p
     assert not report["ok"]
     assert report["checks"]["emitted_graph_geometry"]=="fail"
     assert any(error["code"]=="invalid_graph_inventory" for error in report["errors"])
+
+
+def sampled_graph(count=101, *, anchors=None, interpolation="linear"):
+    points = [[1+8*i/(count-1), 1+8*i/(count-1)] for i in range(count)]
+    return {"width_mm": 120, "height_mm": 90, "x_range": [0, 10], "y_range": [0, 10],
+            "curves": [{"id": "sampled-ramp", "points": points, "point_mode": "samples",
+                        "anchor_indices": anchors or [0, count-1], "interpolation": interpolation}]}
+
+
+@pytest.mark.parametrize("points", [
+    [[0, 0], [1e-12, 0]],
+    [[0, 0], [1e-12, 0], [1, 1]],
+    [[-1, -1], [0, 0], [1e-12, 0]],
+])
+def test_sampled_distinct_data_points_can_collapse_to_one_page_point(points):
+    graph = sampled_graph(2)
+    graph.update(x_range=[-1e8, 1e8], y_range=[-1e8, 1e8])
+    graph["curves"][0].update(points=points, anchor_indices=list(range(len(points))))
+    result, _ = box(spec=graph)
+    curve = result.items[0]
+    samples = path_samples(curve["strokes"][0])
+    assert all(math.isfinite(value) for point in samples for value in point)
+    assert all(anchor in samples for anchor in curve["graph_plot_anchors_mm"])
+
+
+def ordinate(path, x):
+    """Independent evaluation of an exported monotone cubic at page x."""
+    from scipy.optimize import brentq
+    start = path["start"]
+    for segment in path["segments"]:
+        end = segment["end"]
+        if start[0]-1e-9 <= x <= end[0]+1e-9:
+            def value(t, axis):
+                q = 1-t
+                return (q**3*start[axis]+3*q*q*t*segment["control1"][axis]
+                        +3*q*t*t*segment["control2"][axis]+t**3*end[axis])
+            t = 0. if x <= start[0] else 1. if x >= end[0] else brentq(lambda t: value(t, 0)-x, 0, 1)
+            return value(t, 1)
+        start = end
+    raise AssertionError("x outside curve")
+
+
+@pytest.mark.parametrize("interpolation", ["linear", "smooth"])
+def test_sample_density_does_not_restart_or_shrink_reviewed_residual(interpolation):
+    sparse, _ = box(spec=sampled_graph(2, interpolation=interpolation))
+    dense, _ = box(spec=sampled_graph(401, interpolation=interpolation))
+    first, second = sparse.items[0], dense.items[0]
+    assert first["graph_data_anchors"] == second["graph_data_anchors"] == [[1, 1], [9, 9]]
+    a, b = first["graph_plot_anchors_mm"]
+    positions = np.linspace(a[0], b[0], 101)
+    assert [ordinate(first["strokes"][0], x) for x in positions] == pytest.approx(
+        [ordinate(second["strokes"][0], x) for x in positions], abs=1e-8)
+    errors = [abs(ordinate(second["strokes"][0], x)-(a[1]+(b[1]-a[1])*(x-a[0])/(b[0]-a[0]))) for x in positions]
+    assert max(errors) > .15  # Visible source residual survives 400 sampling intervals.
+    # Opting out retains the legacy promise that every supplied point is exact.
+    legacy = sampled_graph(401)
+    legacy["curves"][0].pop("point_mode"); legacy["curves"][0].pop("anchor_indices")
+    old, _ = box(spec=legacy)
+    assert len(old.items[0]["graph_data_anchors"]) == 401
+    ends = [old.items[0]["strokes"][0]["start"]]+[s["end"] for s in old.items[0]["strokes"][0]["segments"]]
+    assert all(p in ends for p in old.items[0]["graph_plot_anchors_mm"])
+
+
+def test_sampled_curve_pins_declared_anchor_extremum_plateau_and_vertical_segment():
+    graph = sampled_graph()
+    points = [[0, 0], [1, 1], [2, 2], [3, 1], [4, 0], [5, 0], [5, 1], [5, 2]]
+    graph["curves"][0].update(points=points, anchor_indices=[0, 1, 7])
+    assert sampled_curve_protected_indices(points, [0, 1, 7]) == [0, 1, 2, 4, 5, 7]
+    result, _ = box(spec=graph)
+    item = result.items[0]; path = item["strokes"][0]
+    ends = [path["start"]]+[s["end"] for s in path["segments"]]
+    mapped = lambda p: [12+p[0]*9.6, 78-p[1]*6.6]
+    for i in [0, 1, 2, 4, 5, 7]:
+        assert any(math.dist(mapped(points[i]), p) < 1e-9 for p in ends)
+    samples = path_samples(path)
+    assert all(12-.45 <= p[0] <= 60+.45 and 64.8-.45 <= p[1] <= 78+.45 for p in samples)
+    for first, last, along, across in [(4, 5, 0, 1), (5, 7, 1, 0)]:
+        start = next(i for i, p in enumerate(ends) if math.dist(mapped(points[first]), p) < 1e-9)
+        stop = next(i for i, p in enumerate(ends) if math.dist(mapped(points[last]), p) < 1e-9)
+        section = {"start": ends[start], "segments": path["segments"][start:stop], "closed": False}
+        traced = path_samples(section)
+        errors = [abs(p[across]-ends[start][across]) for p in traced]
+        assert .005 < max(errors) <= .45
+        direction = 1 if ends[stop][along] > ends[start][along] else -1
+        assert all((b[along]-a[along])*direction > 0 for a, b in zip(traced, traced[1:]))
+    assert graph["curves"][0]["points"] == points  # Constant mathematical values stay explicit.
+
+
+@pytest.mark.parametrize("change", [
+    lambda c: c.pop("anchor_indices"),
+    lambda c: c.update(anchor_indices=[1, 100]),
+    lambda c: c.update(anchor_indices=[0, 99]),
+    lambda c: c.update(anchor_indices=[0, 50, 50, 100]),
+    lambda c: c.update(anchor_indices=[0, True, 100]),
+    lambda c: c.update(anchor_indices=[0, 100.0]),
+    lambda c: c.update(anchor_indices=[0, 101]),
+    lambda c: c.update(point_mode="anchors"),
+    lambda c: c.update(point_mode="implicit"),
+])
+def test_sampled_curve_requires_an_explicit_valid_anchor_contract(change):
+    from inkform.errors import InkformError
+    from inkform.graphs import validate_graph
+    graph = sampled_graph(); change(graph["curves"][0])
+    with pytest.raises(InkformError) as error:
+        validate_graph(graph)
+    assert error.value.code == "invalid_graph"
+
+
+def test_sampled_curve_pdf_audits_baseline_and_exact_semantic_anchor(tmp_path):
+    graph = sampled_graph(101, anchors=[0, 50, 100])
+    doc = document(); doc["blocks"][0]["graph"] = graph
+    result = render_document(doc, graph_profile(), tmp_path/"sampled.pdf", preview_dpi=150)
+    manifest = json.loads(Path(result["manifest"]).read_text())
+    report = json.loads(Path(result["report"]).read_text())
+    assert report["ok"] and report["checks"]["emitted_graph_geometry"] == "pass"
+    item = manifest["instances"][0]
+    assert item["graph_data_anchors"] == [[1, 1], [5, 5], [9, 9]]
+    ends = [item["strokes"][0]["start"]]+[s["end"] for s in item["strokes"][0]["segments"]]
+    assert all(p in ends for p in item["graph_plot_anchors_mm"])
+    # The PDF audit reconstructs samples from the original graph specification;
+    # changing both the emitted path and manifest handles cannot replace them.
+    item["strokes"][0]["segments"][1]["control1"][1] += .1
+    from inkform.layout import item_bounds
+    item["ink_bounds"] = item_bounds(item)
+    manifest["geometry_hash"] = hashlib.sha256(json.dumps(manifest["instances"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    altered = tmp_path/"changed-sampled.pdf"
+    export_pdf(manifest, graph_profile(), altered, "changed sampled path")
+    manifest["pdf_sha256"] = hashlib.sha256(altered.read_bytes()).hexdigest()
+    changed = check_pdf(altered, manifest, preview_dpi=36)
+    assert changed["checks"]["emitted_graph_geometry"] == "fail"
+
+
+def test_sampled_curve_without_source_keeps_explicit_baseline(tmp_path):
+    profile = graph_profile()
+    profile["observations"][0]["strokes"] = []
+    doc = document(); doc["blocks"][0]["graph"] = sampled_graph()
+    result = render_document(doc, profile, tmp_path/"no-source.pdf", preview_dpi=36)
+    report = json.loads(Path(result["report"]).read_text())
+    assert report["ok"] and report["checks"]["emitted_graph_geometry"] == "pass"
+
+
+def test_sample_limit_allows_inserted_intersections_without_changing_legacy_limit():
+    from inkform.errors import InkformError
+    from inkform.graphs import validate_graph
+    assert validate_graph(sampled_graph(2048))
+    with pytest.raises(InkformError):
+        validate_graph(sampled_graph(2049))
+    graph = sampled_graph(513)
+    graph["curves"][0].pop("point_mode"); graph["curves"][0].pop("anchor_indices")
+    with pytest.raises(InkformError):
+        validate_graph(graph)
+
+
+def test_shallow_sampled_curve_reduces_source_scale_without_manufacturing_flat_tails():
+    results = []
+    for count in [2, 101, 401]:
+        graph = sampled_graph(count)
+        for i, point in enumerate(graph["curves"][0]["points"]):
+            point[1] = 1+.1*i/(count-1)
+        result, _ = box(spec=graph)
+        path = result.items[0]["strokes"][0]
+        samples = path_samples(path)
+        assert all(a[1] > b[1] for a, b in zip(samples, samples[1:]))
+        a, b = result.items[0]["graph_plot_anchors_mm"]
+        errors = [abs(p[1]-(a[1]+(b[1]-a[1])*(p[0]-a[0])/(b[0]-a[0]))) for p in samples]
+        assert max(errors) > .04  # Attenuation retains visible source variation.
+        results.append([ordinate(path, x) for x in np.linspace(a[0], b[0], 101)])
+    assert results[0] == pytest.approx(results[1], abs=1e-8)
+    assert results[0] == pytest.approx(results[2], abs=1e-8)

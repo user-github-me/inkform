@@ -704,9 +704,9 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
     an exact primitive inventory, data mapping, anchors and marker semantics
     must agree. The emitted pass checks actual PDF path coordinates as well.
     """
-    from .graphs import _curve_stroke, graph_axis_anchors, graph_requirements, validate_graph, validate_graph_style
+    from .graphs import _curve_stroke, graph_axis_anchors, graph_curve_anchors, graph_requirements, validate_graph, validate_graph_style
     from .graph_traces import (axis_trace_path, curve_trace_path, marker_trace_path, path_distance,
-                               path_samples, paths_touch, resolve_trace, tick_trace_path, trace_candidates)
+                               path_samples, paths_touch, resolve_trace, sampled_curve_trace_path, tick_trace_path, trace_candidates)
     records = manifest.get("graphs", [])
     primitives = [item for item in instances if is_graph_primitive(item)]
     attributed = [item for item in instances if "graph_id" in item or item.get("content_kind") == "graph_primitive"]
@@ -762,7 +762,7 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                     expected[f"{identity}.tick.{tick['id']}"] = ("tick", [tick["at"]], tick)
                     tick_axes[f"{identity}.tick.{tick['id']}"] = axis
             for curve in spec.get("curves", []):
-                expected[f"{identity}.curve.{curve['id']}"] = ("curve", curve["points"], curve)
+                expected[f"{identity}.curve.{curve['id']}"] = ("curve", graph_curve_anchors(curve), curve)
             for marker in spec.get("markers", []):
                 expected[f"{identity}.marker.{marker['id']}"] = ("marker", [marker["at"]], marker)
             if set(primitive_ids) != set(expected):
@@ -812,7 +812,12 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                         canonical = axis_trace_path(expected_anchors,candidate,size,has_ticks=bool(element.get("ticks")))
                     elif kind == "curve":
                         role = "curve"
-                        canonical = curve_trace_path(expected_anchors,element.get("interpolation","linear"),candidate,size)
+                        if element.get("point_mode") == "samples":
+                            baseline_points = [[value+offset[axis] for axis, value in enumerate(mapped(point))] for point in element["points"]]
+                            canonical = sampled_curve_trace_path(baseline_points, element.get("interpolation", "linear"),
+                                                                 element["anchor_indices"], candidate, size)
+                        else:
+                            canonical = curve_trace_path(expected_anchors,element.get("interpolation","linear"),candidate,size)
                     elif kind == "tick":
                         role = "tick"
                         axis = tick_axes[token]; a,b = mapped(axis["from"]),mapped(axis["to"])
@@ -828,14 +833,21 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                     actual = expected_anchors
                 elif kind in {"axis", "curve"}:
                     actual = [path["start"]]+[segment["end"] for segment in path["segments"]]
+                    sampled = kind == "curve" and element.get("point_mode") == "samples"
+                    baseline_points = ([[value+offset[axis] for axis, value in enumerate(mapped(point))] for point in element["points"]]
+                                       if sampled else expected_anchors)
                     if observed_only:
                         interpolation = element.get("interpolation", "linear") if kind == "curve" else "linear"
-                        canonical = _curve_stroke(expected_anchors, interpolation, lambda _: 0, 0)
+                        canonical = _curve_stroke(baseline_points, interpolation, lambda _: 0, 0)
                         if len(path["segments"]) != len(canonical["segments"]) or any(
                             segment["type"] != "cubic" or any(math.dist(segment[key], target[key]) > .002
                             for key in ("control1", "control2", "end"))
                             for segment, target in zip(path["segments"], canonical["segments"])):
                             raise ValueError("observed-mode graph paths must retain explicit interpolation without invented bends")
+                    if sampled:
+                        if len(actual) != len(element["points"]):
+                            raise ValueError("an unsupported sampled curve must retain its explicit baseline spans")
+                        actual = [actual[i] for i in element["anchor_indices"]]
                 elif kind == "tick":
                     if len(path["segments"]) != 1:
                         raise ValueError("graph tick must have one span")
@@ -1100,12 +1112,39 @@ def check_pdf(pdf_path: Path, manifest: dict | None = None, preview_dir: Path | 
                 report["checks"]["emitted_glyph_geometry"] = "fail" if mismatches else "pass"
                 if mismatches:
                     _issue(report, "emitted_glyph_mismatch", "PDF glyph ink differs from its manifest geometry.", instances=mismatches[:100], count=len(mismatches))
+                if "context_size_audit" in manifest:
+                    from .variant_context import audit_context_sizes
+                    contract=manifest["context_size_audit"]
+                    if not isinstance(contract,dict) or contract.get("version")!="inkform-context-size-audit-1":
+                        raise ValueError("Unsupported context-size audit contract")
+                    # Reuse only semantic/context metadata from the sidecar.
+                    # Every measured contour comes from the emitted PDF path
+                    # groups, including independent fill/stroke paints.
+                    actual_context=[]
+                    for item in emitted:
+                        expected_item=by_token[item["token_id"]]
+                        actual_context.append({**expected_item,**item,
+                            "strokes":[stroke for paint in item["_ink_paints"] for stroke in paint["strokes"]]})
+                    audit=audit_context_sizes(actual_context)
+                    report["context_size_audit"]={**audit,"geometry_source":"emitted_pdf_vector_paths"}
+                    report["checks"]["context_sizes"]="fail" if audit["errors"] else "pass"
+                    if audit["errors"]:
+                        _issue(report,"context_size_mismatch","Emitted glyph ink has a clear size mismatch with its writing context.",
+                               instances=audit["errors"][:100],count=len(audit["errors"]))
+                    if audit["warnings"]:
+                        _warning(report,"context_size_outside_preferred_range","Some emitted source forms fall outside the preferred context size range.",
+                                 instances=audit["warnings"][:100],count=len(audit["warnings"]))
             elif isinstance(manifest.get("instances"), list):
                 _check_repetition(manifest, manifest["instances"], report)
                 report["checks"]["emitted_glyph_geometry"] = "not_checked"
+                if "context_size_audit" in manifest:
+                    report["checks"]["context_sizes"]="fail"
+                    _issue(report,"context_size_audit_unavailable","The declared context-size audit requires emitted glyph path groups.")
         except (KeyError, TypeError, ValueError, OverflowError) as exc:
             report["checks"]["repetition"] = "fail"
             report["checks"]["emitted_glyph_geometry"] = "fail"
+            if "context_size_audit" in manifest:
+                report["checks"]["context_sizes"]="fail"
             _issue(report, "invalid_emitted_glyph_geometry", "Could not independently verify emitted glyph paths.", reason=str(exc))
     else:
         report["checks"].update({"manifest_pdf_hash": "not_checked", "instance_geometry": "not_checked",

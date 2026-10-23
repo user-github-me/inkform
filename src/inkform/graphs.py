@@ -81,7 +81,7 @@ def validate_graph(spec, path="graph"):
         for i, entry in enumerate(entries):
             item_path = f"{path}.{category}[{i}]"
             allowed = {"axes": ("id", "from", "to", "arrow", "ticks"),
-                       "curves": ("id", "points", "interpolation"),
+                       "curves": ("id", "points", "interpolation", "point_mode", "anchor_indices"),
                        "markers": ("id", "at", "style", "radius_mm"),
                        "labels": ("id", "at", "text", "offset_mm")}[category]
             required = {"axes": ("id", "from", "to"), "curves": ("id", "points"),
@@ -110,8 +110,9 @@ def validate_graph(spec, path="graph"):
                     if "offset_mm" in tick: _pair(tick["offset_mm"], tp + ".offset_mm")
             elif category == "curves":
                 points = entry["points"]
-                if not isinstance(points, list) or not 2 <= len(points) <= 512:
-                    _fail("A curve requires between 2 and 512 supplied anchors.", item_path + ".points")
+                maximum = 2048 if entry.get("point_mode") == "samples" else 512
+                if not isinstance(points, list) or not 2 <= len(points) <= maximum:
+                    _fail(f"A curve requires between 2 and {maximum} supplied points.", item_path + ".points")
                 for j, p in enumerate(points): point(p, f"{item_path}.points[{j}]")
                 if any(a == b for a, b in zip(points, points[1:])):
                     _fail("Consecutive graph anchors must be distinct.", item_path + ".points")
@@ -120,6 +121,18 @@ def validate_graph(spec, path="graph"):
                     _fail("Graph interpolation must be linear or smooth.", item_path + ".interpolation")
                 if interpolation == "smooth" and any(a[0] >= b[0] for a, b in zip(points, points[1:])):
                     _fail("Smooth graph anchors need strictly increasing x; use explicit linear segments for vertical paths.", item_path + ".points")
+                point_mode = entry.get("point_mode", "anchors")
+                if point_mode not in ("anchors", "samples"):
+                    _fail("Curve point_mode must be anchors or samples.", item_path + ".point_mode")
+                if point_mode == "samples":
+                    indices = entry.get("anchor_indices")
+                    if (not isinstance(indices, list) or len(indices) < 2
+                            or any(not isinstance(i, int) or isinstance(i, bool) or not 0 <= i < len(points) for i in indices)
+                            or indices[0] != 0 or indices[-1] != len(points)-1
+                            or any(a >= b for a, b in zip(indices, indices[1:]))):
+                        _fail("Sampled curves require increasing anchor_indices including both endpoints.", item_path + ".anchor_indices")
+                elif "anchor_indices" in entry:
+                    _fail("anchor_indices applies only to an explicitly sampled curve.", item_path + ".anchor_indices")
             else:
                 point(entry["at"], item_path + ".at")
                 if category == "markers":
@@ -161,6 +174,12 @@ The reviewed line may meet a tick anywhere within its visible cross-stroke,
 rather than being flattened at every tick. The PDF audit verifies contact.
 """
     return [list(axis["from"]), list(axis["to"])]
+
+
+def graph_curve_anchors(curve):
+    """Only an explicit samples declaration relaxes the all-points contract."""
+    indices = curve["anchor_indices"] if curve.get("point_mode") == "samples" else range(len(curve["points"]))
+    return [list(curve["points"][i]) for i in indices]
 
 
 def _trace_deviation(trace):
@@ -294,7 +313,7 @@ def _curve_stroke(points, interpolation, signed, amplitude):
 def graph_box(spec, shaper, token_id):
     """Make a graph Box; append a separate ledger to ``shaper.graphs``."""
     from .layout import Box, map_strokes
-    from .graph_traces import (axis_trace_path, curve_trace_path, graph_evidence, marker_trace_path,
+    from .graph_traces import (axis_trace_path, curve_trace_path, graph_evidence, marker_trace_path, sampled_curve_trace_path,
                                select_trace, tick_trace_path, trace_candidates, trace_reference)
     validate_graph(spec)
     width, height = spec["width_mm"], spec["height_mm"]
@@ -328,7 +347,8 @@ def graph_box(spec, shaper, token_id):
                         "source_evidence": evidence, "unsupported_primitives": [],
                         "source_fidelity": "reviewed source trace knots and polarity where available; explicit graph geometry for unsupported stroke kinds",
                         "axis_tick_contact": "exact data centres; reviewed axis may cross within 0.45 mm of centre",
-                        "data_anchors": "preserved_exactly", "curve_interpolation": "explicit_specification"}}
+                        "data_anchors": "preserved_exactly", "curve_interpolation": "explicit_specification",
+                        "sampled_curve_transfer": "source residual along baseline arc length between explicit anchors and coordinate extrema"}}
 
     def signed(identity, domain):
         return 2 * stable_value(shaper.seed, identity, domain) - 1
@@ -406,9 +426,15 @@ def graph_box(spec, shaper, token_id):
     for curve in spec.get("curves", []):
         points = [mapped(p) for p in curve["points"]]
         candidate = select_trace(evidence, "curve", shaper.seed, f"{token_id}.curve.{curve['id']}")
-        stroke = curve_trace_path(points, curve.get("interpolation", "linear"), candidate, shaper.size) if candidate else _curve_stroke(points, curve.get("interpolation", "linear"),
-                               lambda i: signed(curve["id"], f"{token_id}-curve-{i}"), amplitude)
-        primitive("curve", curve["id"], [stroke], curve["points"], candidate=candidate)
+        if candidate and curve.get("point_mode") == "samples":
+            stroke = sampled_curve_trace_path(points, curve.get("interpolation", "linear"),
+                                              curve["anchor_indices"], candidate, shaper.size)
+        elif candidate:
+            stroke = curve_trace_path(points, curve.get("interpolation", "linear"), candidate, shaper.size)
+        else:
+            stroke = _curve_stroke(points, curve.get("interpolation", "linear"),
+                                   lambda i: signed(curve["id"], f"{token_id}-curve-{i}"), amplitude)
+        primitive("curve", curve["id"], [stroke], graph_curve_anchors(curve), candidate=candidate)
     for marker in spec.get("markers", []):
         x, y = mapped(marker["at"]); radius = marker.get("radius_mm", .8)
         # Symmetric opposing handles keep the actual marker centre exact.

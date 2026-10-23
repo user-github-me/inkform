@@ -7,11 +7,14 @@ auditor runs these same transfers from the evidence, never from output handles.
 from __future__ import annotations
 
 import copy
+from bisect import bisect_right
 import hashlib
 import json
 import math
 
-from scipy.interpolate import CubicSpline, PchipInterpolator
+import numpy as np
+from scipy.interpolate import CubicHermiteSpline, CubicSpline, PchipInterpolator
+from scipy.optimize import brentq
 
 from .variation import stable_value
 
@@ -233,6 +236,179 @@ def curve_trace_path(anchors, interpolation, candidate, size):
                     segment["control1"][axis] = segment["control2"][axis] = (segment["control1"][axis]+segment["control2"][axis])/2
             start = end
         result["segments"].extend(stroke["segments"])
+    return result
+
+
+def sampled_curve_protected_indices(points, anchor_indices):
+    """Pin declared values, coordinate extrema, and both ends of plateaus.
+
+    Sampling density is never itself a reason to restart the source stroke.
+    A reversal or a plateau is part of the specified shape, so it also limits
+    the transfer even when the caller did not mark it as a data anchor.
+    """
+    protected = set(anchor_indices)
+    for i in range(1, len(points)-1):
+        for axis in (0, 1):
+            before = points[i][axis]-points[i-1][axis]
+            after = points[i+1][axis]-points[i][axis]
+            if before*after < 0 or (before == 0) != (after == 0):
+                protected.add(i)
+    return sorted(protected)
+
+
+class _SampledBaseline:
+    """The explicit interpolation plus a deterministic arc-length clock."""
+
+    def __init__(self, points, interpolation):
+        self.points = points
+        self.spline = (PchipInterpolator([p[0] for p in points], [p[1] for p in points])
+                       if interpolation == "smooth" else None)
+        self.derivative = self.spline.derivative() if self.spline is not None else None
+        if self.spline is not None:
+            self.nodes, self.weights = np.polynomial.legendre.leggauss(12)
+        self.distance = [0.]
+        for a, b in zip(points, points[1:]):
+            length = self._arc(a[0], b[0]) if self.spline is not None else math.dist(a, b)
+            self.distance.append(self.distance[-1]+length)
+        corners = {0, len(points)-1}
+        for i in range(1, len(points)-1):
+            a, b, c = points[i-1:i+2]
+            cross = (b[0]-a[0])*(c[1]-b[1])-(b[1]-a[1])*(c[0]-b[0])
+            if abs(cross) > 1e-12*max(1., math.dist(a, b)*math.dist(b, c)):
+                corners.add(i)
+        # Redundant collinear samples must not tighten/loosen the derivative
+        # bound by subdividing an otherwise identical source cubic.
+        self.break_indices = corners if self.spline is None or len(corners) == 2 else set(range(len(points)))
+
+    def _arc(self, start, end):
+        half = (end-start)/2
+        slopes = self.derivative((start+end)/2+half*self.nodes)
+        return float(half*np.dot(self.weights, np.sqrt(1+slopes*slopes)))
+
+    def at(self, distance):
+        """Return point, interpolation parameter, derivative, and ds/dparam."""
+        i = min(len(self.points)-2, max(0, bisect_right(self.distance, distance)-1))
+        a, b = self.points[i], self.points[i+1]
+        offset = min(self.distance[i+1]-self.distance[i], max(0., distance-self.distance[i]))
+        if self.spline is None:
+            length = self.distance[i+1]-self.distance[i]
+            if length == 0:
+                return list(a), distance, [0., 0.], 1.
+            tangent = [(b[j]-a[j])/length for j in (0, 1)]
+            return [a[j]+tangent[j]*offset for j in (0, 1)], distance, tangent, 1.
+        if offset < 1e-10:
+            x = a[0]
+        elif self.distance[i+1]-distance < 1e-10:
+            x = b[0]
+        else:
+            x = brentq(lambda x: self._arc(a[0], x)-offset, a[0], b[0], xtol=1e-12)
+        slope = float(self.derivative(x))
+        return [x, float(self.spline(x))], x, [1., slope], math.hypot(1., slope)
+
+
+def sampled_curve_trace_path(points, interpolation, anchor_indices, candidate, size):
+    """Transfer real residuals across a sampled baseline, not each sample pair.
+
+    The old ``curve_trace_path`` keeps every supplied point exact. This path
+    is only available after the spec explicitly identifies baseline samples
+    and mandatory anchor indices. Source knots are placed by arc length;
+    baseline knots merely split the same residual for faithful interpolation.
+    Forward progress, extrema and anchors bound the transfer. On a declared
+    plateau/vertical baseline the pen may depart normally, like a drawn axis;
+    the explicit sample coordinates still carry the mathematical constant.
+    """
+    trace, source_anchors = candidate["trace_px"], candidate["anchors_px"]
+    source_indices = [trace.index(point) for point in source_anchors]
+    profiles = [_chord_profile(trace[a:b+1], candidate["xheight_px"])
+                for a, b in zip(source_indices, source_indices[1:])]
+    baseline = _SampledBaseline(points, interpolation)
+    protected = sampled_curve_protected_indices(points, anchor_indices)
+    result = {"start": list(points[0]), "segments": [], "closed": False}
+    for span_index, (first, last) in enumerate(zip(protected, protected[1:])):
+        a, b = points[first], points[last]
+        dx, dy = b[0]-a[0], b[1]-a[1]
+        chord = math.hypot(dx, dy)
+        start_s, end_s = baseline.distance[first], baseline.distance[last]
+        length = end_s-start_s
+        if length <= 1e-9:
+            # Nearly coincident explicit intersections still keep both data
+            # anchors. Their bounded source deviation is below roundoff.
+            result["segments"].append({"type": "cubic",
+                "control1": [a[j]+(b[j]-a[j])/3 for j in (0, 1)],
+                "control2": [b[j]-(b[j]-a[j])/3 for j in (0, 1)], "end": list(b)})
+            continue
+        normal = [-dy/chord, dx/chord]
+        source_knots, residual = profiles[span_index % len(profiles)]
+        shape = PchipInterpolator(source_knots, residual)
+        if baseline.spline is not None and (baseline.derivative(a[0]) == 0 or baseline.derivative(b[0]) == 0):
+            # A source tangent cannot carry the curve past a declared smooth
+            # extremum. Fit a flat residual tangent there, keeping every
+            # reviewed source knot rather than flattening output samples.
+            derivatives = shape.derivative()(source_knots)
+            if baseline.derivative(a[0]) == 0:
+                derivatives[0] = 0.
+            if baseline.derivative(b[0]) == 0:
+                derivatives[-1] = 0.
+            shape = CubicHermiteSpline(source_knots, residual, derivatives)
+        shape_derivative = shape.derivative()
+        cap = min(.45, length*.015)
+        scale = min(size, cap/max(max(abs(v) for v in residual), 1e-12))
+        baseline_knots = {first, last} | {i for i in baseline.break_indices if first < i < last}
+        distances = sorted(set([baseline.distance[i] for i in baseline_knots]+[start_s+u*length for u in source_knots]))
+        # Coalesce roundoff at a coincident source/baseline knot. The exact
+        # endpoints are restored below; no source interval is resampled.
+        distances = [s for i, s in enumerate(distances) if not i or s-distances[i-1] > 1e-10]
+        distances[0], distances[-1] = start_s, end_s
+        samples = [baseline.at(s) for s in distances]
+        bends, slopes = [], []
+        for s, (point, parameter, tangent, arc_speed) in zip(distances, samples):
+            u = (s-start_s)/length
+            bend = float(shape(u))*scale
+            bends.append(bend)
+            slopes.append(float(shape_derivative(u))*scale/length*arc_speed)
+        pieces, attenuation = [], 1.
+        for i in range(len(samples)-1):
+            p0, t0, tangent0, _ = samples[i]
+            p1, t1, tangent1, _ = samples[i+1]
+            if i == 0:
+                p0 = list(a)
+            if i == len(samples)-2:
+                p1 = list(b)
+            if baseline.spline is None:
+                # Piecewise linear baselines have one-sided tangents at a
+                # knot; each output span lies in a single original segment.
+                tangent0 = tangent1 = [(p1[j]-p0[j])/(t1-t0) for j in (0, 1)]
+            third = (t1-t0)/3
+            controls = [list(p0), [p0[j]+tangent0[j]*third for j in (0, 1)],
+                        [p1[j]-tangent1[j]*third for j in (0, 1)], list(p1)]
+            shifts = [[normal[j]*bend for j in (0, 1)] for bend in
+                      (bends[i], bends[i]+slopes[i]*third, bends[i+1]-slopes[i+1]*third, bends[i+1])]
+            # Reduce one source scale for this entire semantic interval. A
+            # pointwise clamp would manufacture flat tails where the source
+            # residual crosses a shallow baseline's endpoint envelope.
+            for axis in (0, 1):
+                if a[axis] == b[axis]:
+                    # This coordinate describes a constant baseline, not a
+                    # demand that every pen pixel be mechanically straight.
+                    continue
+                low, high = sorted((p0[axis], p1[axis]))
+                for j in (1, 2):
+                    controls[j][axis] = min(high, max(low, controls[j][axis]))
+                direction = 1 if b[axis] >= a[axis] else -1
+                if (controls[2][axis]-controls[1][axis])*direction < 0:
+                    controls[1][axis] = controls[2][axis] = (controls[1][axis]+controls[2][axis])/2
+                for j in range(3):
+                    available = (controls[j+1][axis]-controls[j][axis])*direction
+                    opposing = (shifts[j][axis]-shifts[j+1][axis])*direction
+                    if opposing > 0:
+                        attenuation = min(attenuation, max(0., available)/opposing)
+            pieces.append((controls, shifts))
+        if attenuation < 1:
+            attenuation *= .999  # Keep a positive derivative at the limiting control.
+        for controls, shifts in pieces:
+            values = [[point[j]+attenuation*shift[j] for j in (0, 1)] for point, shift in zip(controls, shifts)]
+            result["segments"].append({"type": "cubic", "control1": values[1], "control2": values[2], "end": values[3]})
+        result["segments"][-1]["end"] = list(b)
     return result
 
 

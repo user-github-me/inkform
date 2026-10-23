@@ -62,6 +62,22 @@ The immutable profile records the calibration plan and its `execution_report_pat
 
 Measurements report sample counts, medians, spread, and evidence limits. Keep isolated-glyph advances and body bounds distinct from word spacing observed on real lines. A photo's pixel dimensions do not reveal physical writing size. Preserve a user-selected print size until proper physical-scale evidence is available. Do not relabel estimated pen darkness as pressure.
 
+For character size, measure local lowercase bodies in the source line. A capital's
+own height is not its x-height reference: using it can shrink that capital when
+mixed with correctly calibrated lowercase forms. Record nearby body-letter
+boxes, baseline, source hash, and measurement uncertainty. When a previous
+normalization is wrong, review and correct that calibration uniformly from the
+original mask; retain the old version and the unchanged letter construction.
+
+Review every character in its actual use: case and word position, ordinary
+text or mathematical role, baseline or script placement, and neighboring
+letter anatomy. An ascender such as `l` should not force `a` to the same total
+height; detached dots and descenders should not determine body size. Prefer
+compatible real variants before balancing reuse. An unmistakably undersized
+bank needs a source-calibration repair or additional genuine forms. Inspect
+reported marginal size estimates rather than treating all unusual handwriting
+as an error. Check the requested document with its exact frozen profile.
+
 ## Natural variation and corrections
 
 Natural character variation comes from independently written, reviewed source occurrences. Learn measured dimensions and layout statistics from compatible source evidence, keeping unrelated characters separate. Observed rendering retains the selected form's construction; it does not manufacture a wider shape distribution when evidence is sparse. Check repeated letters and arrows in calibration, not only a passage where every symbol appears once. A fixed seed keeps the comparison repeatable while the selected source occurrences can differ.

@@ -1,6 +1,6 @@
 {
   "name": "@nazifbd/inkform",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Learn private handwriting profiles and write printable vector PDFs, with an open agent skill",
   "type": "module",
   "bin": {

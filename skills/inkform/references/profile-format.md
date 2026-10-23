@@ -38,7 +38,9 @@ explicit superscript/subscript layout applies its reduction once.
 Size comparisons are geometry estimates even for reviewed context annotations.
 Latin lowercase bodies use ink above the baseline, excluding descenders and
 detached i/j dots; ascenders and capitals use the writer's ordinary stem scale.
-Digits use digit ink height. Marks and operators do not inherit letter-height
+An i/j stem can start below the ordinary body zone, so it compares locally
+only with another occurrence of the same letter; independent bank checks
+still apply. Digits use digit ink height. Marks and operators do not inherit letter-height
 requirements. A selected neighbor must have independent bank evidence before
 it can establish a clear mismatch, and comparable neighbors must fit in both
 directions. Sparse evidence remains disclosed; marginal fallback favors the

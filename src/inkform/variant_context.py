@@ -23,6 +23,10 @@ NEIGHBOR_HEIGHT_RATIO_BOUNDS = (max(CLEAR_HEIGHT_RATIO_BOUNDS[0], 1/CLEAR_HEIGHT
                               min(CLEAR_HEIGHT_RATIO_BOUNDS[1], 1/CLEAR_HEIGHT_RATIO_BOUNDS[0]))
 LATIN_CAPITALS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 BODY_LETTERS = frozenset("acegijmnopqrsuvwxyz")
+DOTTED_BODY_LETTERS = frozenset("ij")
+# After excluding the dot, an i/j stem can begin below the ordinary body
+# zone. It measures another i/j occurrence, not a different letter's body.
+BODY_REFERENCES = BODY_LETTERS-DOTTED_BODY_LETTERS
 ASCENDER_LETTERS = frozenset("bdfhklt")
 # f and t have particularly variable upper extensions; their own source
 # forms remain usable, but they do not establish the capital/stem scale.
@@ -267,7 +271,8 @@ class VariantContext:
         if selected_neighbors:
             return median(median(values) for values in selected_neighbors.values()), "selected_neighbor_median", len(selected_neighbors)
         pool = {label:heights for label,heights in self.by_category.get(reference_category,{}).items()
-                if label != text and (reference_category != "ascender" or label in ASCENDER_REFERENCES)}
+                if label != text and (reference_category != "ascender" or label in ASCENDER_REFERENCES)
+                and (reference_category != "body_xheight" or label in BODY_REFERENCES)}
         local = [median(heights) for label,heights in pool.items() if label in set(neighbors or [])]
         if len(local) >= 2:
             basis = "neighbor_ascender_median" if reference_category=="ascender" else "neighbor_character_median"
@@ -296,10 +301,12 @@ class VariantContext:
 
     def _comparable_neighbor(self, text, category, expected, item):
         if item["text"]==text:
-            # Repeated f/t/capitals can compare to their own anatomy even
+            # Repeated i/j/f/t/capitals can compare to their own anatomy even
             # though they do not establish the general ascender scale. An
             # independent bank reference must first validate that occurrence.
             return item["anatomy"]==category and self._credible_neighbor(item)
+        if expected=="body_xheight" and (text in DOTTED_BODY_LETTERS or item["text"] in DOTTED_BODY_LETTERS):
+            return False
         return (item["anatomy"]==expected
                 and (expected!="ascender" or item["text"] in ASCENDER_REFERENCES))
 

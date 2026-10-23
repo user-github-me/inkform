@@ -7,7 +7,7 @@ import pytest
 from inkform.errors import InkformError
 from inkform.layout import Shaper, map_strokes
 from inkform.profiles import geometry_bounds, load_profile
-from inkform.variant_context import audit_context_sizes, instance_scale_metric, validate_source_context
+from inkform.variant_context import BODY_LETTERS, audit_context_sizes, instance_scale_metric, validate_source_context
 
 
 @pytest.fixture
@@ -234,7 +234,7 @@ def test_actual_selected_neighbors_keep_body_sizes_coherent(profile):
         assert second["variation"]["context_selection"]["height_reference_basis"]=="selected_neighbor_median"
 
 
-@pytest.mark.parametrize("text",["a","f","t","H"])
+@pytest.mark.parametrize("text",["a","i","j","f","t","H"])
 def test_repeated_character_uses_independently_credible_previous_ink(profile,text):
     shape=writer(profile)
     natural="capital" if text.isupper() else "body"
@@ -254,6 +254,78 @@ def test_repeated_character_uses_independently_credible_previous_ink(profile,tex
         assert context["local_context"]["word_initial"] is False
         assert first["text"]==second["text"]==text
         assert audit_context_sizes([first,second])["errors"]==[]
+
+
+def short_dotted_stem_bank(profile):
+    # Authored contours reproduce the source review's size relationship:
+    # 23px of connected j stem / 35.5px local x-height, beside a 1x u.
+    # Its detached dot is deliberately not an ordinary body-height anchor.
+    context=writer(profile).variant_context
+    for glyph in profile["glyphs"]:
+        if glyph["text"] not in BODY_LETTERS:
+            continue
+        height=context.scale_heights[glyph["glyph_id"]]
+        desired=23/35.5 if glyph["text"] in "ij" else (1.0 if glyph["text"]=="u" else .88)
+        scale=desired/height
+        glyph["strokes"]=map_strokes(glyph["strokes"],lambda x,y:(x*scale,y*scale))
+        glyph["ink_bounds"]=geometry_bounds(glyph["strokes"])
+        glyph["advance"]*=scale
+
+
+@pytest.mark.parametrize("word",["ju","uj","iu","ui","jump"])
+def test_dotted_stem_is_not_a_cross_character_body_reference_in_either_direction(profile,word):
+    short_dotted_stem_bank(profile)
+    items=writer(profile).text(word,"text","source-sized-word").items
+    assert "".join(item["text"] for item in items)==word
+    for item in items:
+        if item["text"] not in "iju":
+            continue
+        context=item["variation"]["context_selection"]
+        assert "selected_neighbor_token_ids" not in context
+        assert context["clear_height_reference_basis"]=="peer_character_median"
+        assert context["clear_height_ratio_bounds"]==[.65,1.8]
+        assert item["variation"]["source_shape_preserved"]
+    dotted=next(item for item in items if item["text"] in "ij")
+    ordinary=next(item for item in items if item["text"]=="u")
+    assert instance_scale_metric(dotted)["height_xheight"]==pytest.approx(23/35.5)
+    assert instance_scale_metric(ordinary)["height_xheight"]==pytest.approx(1.0)
+    assert audit_context_sizes(items)["errors"]==[]
+
+
+@pytest.mark.parametrize("text",["i","j"])
+def test_dotted_stem_still_rejects_a_genuinely_undersized_bank(profile,text):
+    short_dotted_stem_bank(profile)
+    for glyph in profile["glyphs"]:
+        if glyph["text"]==text:
+            glyph["strokes"]=map_strokes(glyph["strokes"],lambda x,y:(x*.5,y*.5))
+            glyph["ink_bounds"]=geometry_bounds(glyph["strokes"])
+    with pytest.raises(InkformError) as error:
+        writer(profile).text(text+"u","text","tiny-dotted-stem")
+    assert error.value.code=="missing_context_compatible_glyph"
+    assert error.value.details["text"]==text
+    context=error.value.details["context_selection"]
+    assert context["clear_height_reference_basis"]=="peer_character_median"
+    assert context["eligible_count"]==0
+    assert all(entry["reason"]=="estimated_height_clearly_incompatible" for entry in context["excluded"])
+
+
+def test_actual_pdf_preserves_source_sized_jump_with_a_short_dotted_stem(profile,tmp_path):
+    import hashlib
+    from inkform.document import literal_document
+    from inkform.layout import plan_document
+    from inkform.rendering import export_pdf
+    from inkform.validation import check_pdf
+    short_dotted_stem_bank(profile)
+    plan=plan_document(literal_document("jump"),profile)
+    pdf=tmp_path/"natural-jump.pdf"
+    export_pdf(plan,profile,pdf,"natural short j stem")
+    plan["pdf_sha256"]=hashlib.sha256(pdf.read_bytes()).hexdigest()
+    report=check_pdf(pdf,plan,preview_dpi=72)
+    assert report["ok"],report["errors"]
+    assert report["checks"]["context_sizes"]=="pass"
+    assert report["context_size_audit"]["geometry_source"]=="emitted_pdf_vector_paths"
+    assert report["context_size_audit"]["checked_glyph_count"]==4
+    assert report["context_size_audit"]["errors"]==[]
 
 
 def test_repeated_character_alone_cannot_establish_its_own_bank_scale(profile):

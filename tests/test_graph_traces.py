@@ -187,6 +187,70 @@ def test_sampled_distinct_data_points_can_collapse_to_one_page_point(points):
     assert all(anchor in samples for anchor in curve["graph_plot_anchors_mm"])
 
 
+def test_sampled_vertical_roundoff_preserves_source_bow_under_translation():
+    from inkform.graph_traces import graph_evidence, path_distance, sampled_curve_trace_path
+    from inkform.layout import map_strokes
+    candidate = trace_candidates(graph_evidence(graph_profile()), "curve")[0]
+    almost_twenty = math.nextafter(20., -math.inf)
+    points = [[20., 40.], [20., 25.], [almost_twenty, 24.9993],
+              [almost_twenty, 15.], [20., 10.]]
+    anchors = list(range(len(points)))
+    original = sampled_curve_trace_path(points, "linear", anchors, candidate, 3.)
+    shifted_points = [[x+90., y+120.] for x, y in points]
+    shifted = sampled_curve_trace_path(shifted_points, "linear", anchors, candidate, 3.)
+    expected = map_strokes([original], lambda x, y: (x+90., y+120.))[0]
+    assert path_distance(shifted, expected) < 1e-8
+    ends = [original["start"]]+[s["end"] for s in original["segments"]]
+    assert all(point in ends for point in points)  # Includes the 0.0007mm span.
+    tail = [p for p in path_samples(original) if 10. < p[1] < 15.]
+    assert max(abs(p[0]-20.) for p in tail) > .02
+
+
+def test_sampled_near_vertical_real_change_still_bounds_forward_progress():
+    from inkform.graph_traces import graph_evidence, sampled_curve_trace_path
+    candidate = trace_candidates(graph_evidence(graph_profile()), "curve")[0]
+    points = [[20., 40.], [20.01, 25.], [20.02, 10.]]
+    path = sampled_curve_trace_path(points, "linear", [0, 2], candidate, 3.)
+    samples = path_samples(path)
+    assert all(20.-1e-10 <= p[0] <= 20.02+1e-10 for p in samples)
+    assert all(a[0] <= b[0]+1e-10 and a[1] >= b[1]-1e-10 for a, b in zip(samples, samples[1:]))
+
+
+def test_sampled_closed_subnanometre_span_retains_baseline_without_a_normal():
+    from inkform.graph_traces import graph_evidence, sampled_curve_trace_path
+    candidate = trace_candidates(graph_evidence(graph_profile()), "curve")[0]
+    points = [[0., 0.], [8e-10, 0.], [8e-10, 8e-10], [0., 8e-10], [0., 0.]]
+    path = sampled_curve_trace_path(points, "linear", [0, 4], candidate, 3.)
+    assert [path["start"]]+[segment["end"] for segment in path["segments"]] == points
+    assert all(math.isfinite(v) for point in path_samples(path) for v in point)
+
+
+def test_sampled_roundoff_graph_pdf_passes_after_rigid_reflow(tmp_path):
+    from inkform.layout import Box, item_bounds
+    graph = sampled_graph(2)
+    x = 2/3
+    points = [[x, 0.], [x, .29999], [math.nextafter(x, 0.), .3],
+              [math.nextafter(x, 0.), .5], [x, .6]]
+    graph.update(x_range=[0, 1], y_range=[0, 1])
+    graph["curves"][0].update(points=points, anchor_indices=list(range(len(points))))
+    doc = document(); doc["blocks"][0]["graph"] = graph
+    profile = graph_profile(); plan = plan_document(doc, profile)
+    plan["instances"] = Box(items=plan["instances"]).shifted(17., 23.).items
+    for item in plan["instances"]:
+        item["ink_bounds"] = item_bounds(item)
+    for line in plan["lines"]:
+        line["baseline_mm"] += 23.
+        line["ink_bounds"] = [v+[17., 23., 17., 23.][i] for i, v in enumerate(line["ink_bounds"])]
+    plan["geometry_hash"] = hashlib.sha256(json.dumps(plan["instances"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    pdf = tmp_path/"shifted-roundoff.pdf"
+    export_pdf(plan, profile, pdf, "rigidly reflowed reviewed graph")
+    plan["pdf_sha256"] = hashlib.sha256(pdf.read_bytes()).hexdigest()
+    report = check_pdf(pdf, plan, preview_dpi=36)
+    assert report["ok"], report["errors"]
+    assert report["checks"]["graph_data_accounted_for"] == "pass"
+    assert report["checks"]["emitted_graph_geometry"] == "pass"
+
+
 def ordinate(path, x):
     """Independent evaluation of an exported monotone cubic at page x."""
     from scipy.optimize import brentq

@@ -239,7 +239,7 @@ def curve_trace_path(anchors, interpolation, candidate, size):
     return result
 
 
-def sampled_curve_protected_indices(points, anchor_indices):
+def sampled_curve_protected_indices(points, anchor_indices, *, absolute_tolerance=0.):
     """Pin declared values, coordinate extrema, and both ends of plateaus.
 
     Sampling density is never itself a reason to restart the source stroke.
@@ -251,6 +251,10 @@ def sampled_curve_protected_indices(points, anchor_indices):
         for axis in (0, 1):
             before = points[i][axis]-points[i-1][axis]
             after = points[i+1][axis]-points[i][axis]
+            if abs(before) <= absolute_tolerance:
+                before = 0.
+            if abs(after) <= absolute_tolerance:
+                after = 0.
             if before*after < 0 or (before == 0) != (after == 0):
                 protected.add(i)
     return sorted(protected)
@@ -322,20 +326,30 @@ def sampled_curve_trace_path(points, interpolation, anchor_indices, candidate, s
     profiles = [_chord_profile(trace[a:b+1], candidate["xheight_px"])
                 for a, b in zip(source_indices, source_indices[1:])]
     baseline = _SampledBaseline(points, interpolation)
-    protected = sampled_curve_protected_indices(points, anchor_indices)
+    # This function receives physical millimetres. Ignore sub-nanometre
+    # mapping roundoff when classifying a constant coordinate, without
+    # rounding any supplied point or removing declared semantic anchors.
+    coordinate_tolerance = 1e-9
+    protected = sampled_curve_protected_indices(points, anchor_indices,
+                                                 absolute_tolerance=coordinate_tolerance)
     result = {"start": list(points[0]), "segments": [], "closed": False}
     for span_index, (first, last) in enumerate(zip(protected, protected[1:])):
         a, b = points[first], points[last]
+        constant_axes = [max(point[axis] for point in points[first:last+1])
+                         - min(point[axis] for point in points[first:last+1]) <= coordinate_tolerance
+                         for axis in (0, 1)]
         dx, dy = b[0]-a[0], b[1]-a[1]
         chord = math.hypot(dx, dy)
         start_s, end_s = baseline.distance[first], baseline.distance[last]
         length = end_s-start_s
-        if length <= 1e-9:
+        if length <= coordinate_tolerance or chord <= coordinate_tolerance:
             # Nearly coincident explicit intersections still keep both data
-            # anchors. Their bounded source deviation is below roundoff.
-            result["segments"].append({"type": "cubic",
-                "control1": [a[j]+(b[j]-a[j])/3 for j in (0, 1)],
-                "control2": [b[j]-(b[j]-a[j])/3 for j in (0, 1)], "end": list(b)})
+            # anchors. A tiny closed span also keeps every baseline sample;
+            # there is no stable chord normal for transferring a residual.
+            for start, end in zip(points[first:last], points[first+1:last+1]):
+                result["segments"].append({"type": "cubic",
+                    "control1": [start[j]+(end[j]-start[j])/3 for j in (0, 1)],
+                    "control2": [end[j]-(end[j]-start[j])/3 for j in (0, 1)], "end": list(end)})
             continue
         normal = [-dy/chord, dx/chord]
         source_knots, residual = profiles[span_index % len(profiles)]
@@ -387,7 +401,7 @@ def sampled_curve_trace_path(points, interpolation, anchor_indices, candidate, s
             # pointwise clamp would manufacture flat tails where the source
             # residual crosses a shallow baseline's endpoint envelope.
             for axis in (0, 1):
-                if a[axis] == b[axis]:
+                if constant_axes[axis]:
                     # This coordinate describes a constant baseline, not a
                     # demand that every pen pixel be mechanically straight.
                     continue

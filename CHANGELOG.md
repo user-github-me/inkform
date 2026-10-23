@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4 — 2026-10-23
+
+- Preserve naturally short dotted i/j stems without using them as the height reference for different body letters. This fixes false size errors in words such as “jump” while retaining independent source-bank and repeated-character checks.
+- Keep sampled vertical graph strokes stable under layout translations and verify source transfers in the renderer's graph-local coordinate frame.
+
 ## 0.4.3 — 2026-10-23
 
 - Check character size using letter anatomy, writing context, and neighboring forms before choosing a source variant. Report uncertain measurements and reject clear size mismatches instead of silently restoring unsuitable forms.

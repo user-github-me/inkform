@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "inkform"
-version = "0.4.3"
+version = "0.4.4"
 description = "Private handwriting profiles and fresh vector ink for printable documents"
 readme = "README.md"
 license = "MIT"

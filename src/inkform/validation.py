@@ -707,6 +707,7 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
     from .graphs import _curve_stroke, graph_axis_anchors, graph_curve_anchors, graph_requirements, validate_graph, validate_graph_style
     from .graph_traces import (axis_trace_path, curve_trace_path, marker_trace_path, path_distance,
                                path_samples, paths_touch, resolve_trace, sampled_curve_trace_path, tick_trace_path, trace_candidates)
+    from .layout import map_strokes
     records = manifest.get("graphs", [])
     primitives = [item for item in instances if is_graph_primitive(item)]
     attributed = [item for item in instances if "graph_id" in item or item.get("content_kind") == "graph_primitive"]
@@ -786,7 +787,8 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                     raise ValueError("graph plot anchors must be finite coordinates")
                 if offset is None:
                     offset = [anchors[0][axis]-mapped(data_anchors[0])[axis] for axis in (0, 1)]
-                expected_anchors = [[value+offset[axis] for axis, value in enumerate(mapped(point))] for point in data_anchors]
+                local_anchors = [mapped(point) for point in data_anchors]
+                expected_anchors = [[value+offset[axis] for axis, value in enumerate(point)] for point in local_anchors]
                 if any(math.dist(actual, expected_point) > .002 for actual, expected_point in zip(anchors, expected_anchors)):
                     raise ValueError("graph coordinate mapping differs between data elements")
                 paints = item.get("_ink_paints")
@@ -809,23 +811,28 @@ def _check_graph_accounting(manifest, instances, report, *, emitted=False):
                     if kind == "axis":
                         a,b=expected_anchors
                         role = "axis_horizontal" if abs(b[0]-a[0]) >= abs(b[1]-a[1]) else "axis_vertical"
-                        canonical = axis_trace_path(expected_anchors,candidate,size,has_ticks=bool(element.get("ticks")))
+                        canonical = axis_trace_path(local_anchors,candidate,size,has_ticks=bool(element.get("ticks")))
                     elif kind == "curve":
                         role = "curve"
                         if element.get("point_mode") == "samples":
-                            baseline_points = [[value+offset[axis] for axis, value in enumerate(mapped(point))] for point in element["points"]]
+                            baseline_points = [mapped(point) for point in element["points"]]
                             canonical = sampled_curve_trace_path(baseline_points, element.get("interpolation", "linear"),
                                                                  element["anchor_indices"], candidate, size)
                         else:
-                            canonical = curve_trace_path(expected_anchors,element.get("interpolation","linear"),candidate,size)
+                            canonical = curve_trace_path(local_anchors,element.get("interpolation","linear"),candidate,size)
                     elif kind == "tick":
                         role = "tick"
                         axis = tick_axes[token]; a,b = mapped(axis["from"]),mapped(axis["to"])
                         dx,dy=b[0]-a[0],b[1]-a[1]; length=math.hypot(dx,dy)
-                        canonical = tick_trace_path(expected_anchors[0],[-dy/length,dx/length],candidate,size)
+                        canonical = tick_trace_path(local_anchors[0],[-dy/length,dx/length],candidate,size)
                     else:
                         role = "marker_"+element["style"]
-                        canonical = marker_trace_path(expected_anchors[0],element.get("radius_mm",.8),candidate)
+                        canonical = marker_trace_path(local_anchors[0],element.get("radius_mm",.8),candidate)
+                    # Shape in the same graph-local frame used by the
+                    # renderer, then apply the independently verified page
+                    # translation. Re-interpolating absolute page coordinates
+                    # can turn roundoff into a different source-transfer path.
+                    canonical = map_strokes([canonical], lambda x,y: (x+offset[0],y+offset[1]))[0]
                     if candidate["role"] != role or path_distance(path,canonical) > .002:
                         raise ValueError("drawn graph geometry differs from its reviewed source trace transfer")
                     # All source paths are reconstructed at the semantic

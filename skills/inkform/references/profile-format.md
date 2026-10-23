@@ -30,10 +30,28 @@ uses the script's own x-height and can use normal script layout scaling.
 otherwise the engine would shrink an already-small source form again.
 
 Selection first favors compatible source context and size, then balances
-genuine variants in that pool. When context is unannotated, size comparisons
-against the writer's other capitals or digits are reported as estimates.
-Sparse coverage remains a disclosed fallback; shape distortion does not repair
-a mislabeled or poorly calibrated donor.
+genuine variants in that pool. Literal case and word-initial position remain
+separate: a first letter is not automatically capitalized. Text and mathematical
+numbers use comparable selected neighbors, including repeated characters;
+explicit superscript/subscript layout applies its reduction once.
+
+Size comparisons are geometry estimates even for reviewed context annotations.
+Latin lowercase bodies use ink above the baseline, excluding descenders and
+detached i/j dots; ascenders and capitals use the writer's ordinary stem scale.
+Digits use digit ink height. Marks and operators do not inherit letter-height
+requirements. A selected neighbor must have independent bank evidence before
+it can establish a clear mismatch, and comparable neighbors must fit in both
+directions. Sparse evidence remains disclosed; marginal fallback favors the
+closest genuine variant, while clear incompatibility reports a source gap
+before emission. The actual-PDF context-size audit checks emitted vector paths
+against both bank and selected-neighbor references.
+
+Calibrate source x-height from ordinary lowercase bodies in the same writing
+context, retaining source boxes, baseline, hashes, and review evidence. A
+capital's full height or a descender is not the x-height denominator. Correct
+a mistaken denominator uniformly in a new reviewed profile version, retaining
+the original source contour and history. Shape distortion does not repair a
+mislabeled or poorly calibrated donor.
 
 `variation.mode` is `observed` by default, including when absent from an older profile. It selects reviewed source forms, excludes `derivation` records, and preserves their internal geometry. Uniform scale and layout placement remain available; interpolation, shape warps, and invented letter or arrow curves are disabled. `experimental` explicitly enables the earlier deformation and derived-form behavior. Save the choice with `profile preferences my-writing --variation-mode observed|experimental`. The normal workflow uses observed mode.
 

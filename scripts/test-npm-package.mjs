@@ -41,6 +41,9 @@ try {
   assert.equal(check.handwriting_raster_objects, 0);
   assert.equal(check.font_text_operators, 0);
   assert.ok(check.vector_path_count > 0);
+  assert.equal(check.checks.context_sizes, 'pass');
+  assert.equal(check.context_size_audit.geometry_source, 'emitted_pdf_vector_paths');
+  assert.ok(check.context_size_audit.checked_glyph_count > 0);
   assert.equal(check.repetition.geometry_source, 'emitted_pdf_vector_paths');
   assert.equal(check.repetition.mode, 'observed');
   assert.equal(check.repetition.enforcement, 'report_source_reuse');

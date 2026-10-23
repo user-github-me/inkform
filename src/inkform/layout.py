@@ -373,6 +373,32 @@ class Shaper:
         box.advance = max(box.advance-left, box.bounds[2]+.035*size)
         return box
 
+    def _run_glyph(self, letters, index, role, token_id, size, selected_metrics, *, whole_run=False, position=None):
+        """Select one glyph with its run context before applying run spacing."""
+        from .variant_context import instance_scale_metric
+        char=letters[index]
+        left,right=(0,len(letters)) if whole_run else (index,index+1)
+        if not whole_run and char.isalnum():
+            while left>0 and letters[left-1].isalnum():
+                left-=1
+            while right<len(letters) and letters[right].isalnum():
+                right+=1
+        local_context={"word_initial":char.isalpha() and left==index,
+                       "previous_text":letters[index-1] if index else None,
+                       "next_text":letters[index+1] if index+1<len(letters) else None,
+                       "role":role,"nominal_size_mm":size or self.size}
+        box=self.glyph(char,role,f"{token_id}:{index}",size,token_id,
+                       index/max(1,len(letters)-1) if position is None else position,
+                       neighbors=[letters[j] for j in range(left,right) if j!=index],
+                       neighbor_metrics=[entry for previous,entry in selected_metrics if previous>=left],
+                       local_context=local_context)
+        for item in box.items:
+            metric=instance_scale_metric(item)
+            if metric:
+                selected_metrics.append((index,metric))
+            item.update(word_id=token_id,word_position=index)
+        return box
+
     def text(self, text, role, token_id, size=None):
         if f"{token_id}:0" in self.page_hints:
             self.commit_page(self.page_hints[f"{token_id}:0"], [])
@@ -426,27 +452,7 @@ class Shaper:
             selected_metrics=[]
             for i, c in enumerate(letters):
                 identity = f"{token_id}:{i}"
-                left,right=i,i+1
-                if c.isalnum():
-                    while left>0 and letters[left-1].isalnum():
-                        left-=1
-                    while right<len(letters) and letters[right].isalnum():
-                        right+=1
-                neighbors=[letters[j] for j in range(left,right) if j!=i]
-                local_context={"word_initial":c.isalpha() and left==i,
-                               "previous_text":letters[i-1] if i else None,
-                               "next_text":letters[i+1] if i+1<len(letters) else None,
-                               "role":role,"nominal_size_mm":size or self.size}
-                box = self.glyph(c, role, identity, size, token_id, i / max(1, len(letters) - 1),
-                                 neighbors=neighbors,neighbor_metrics=[entry for index,entry in selected_metrics if index>=left],
-                                 local_context=local_context)
-                from .variant_context import instance_scale_metric
-                for item in box.items:
-                    metric=instance_scale_metric(item)
-                    if metric:
-                        selected_metrics.append((i,metric))
-                for item in box.items:
-                    item.update(word_id=token_id, word_position=i)
+                box=self._run_glyph(letters,i,role,token_id,size,selected_metrics)
                 if role == "text":
                     gap = self.letter_clearance(identity, size)
                     for item in box.items:
@@ -693,7 +699,11 @@ class Shaper:
         if typ == "symbol":
             return self.text(expr["value"], expr.get("role", "math.variable"), token_id, size)
         if typ == "number":
-            return join([self.glyph(c, "math.digit" if c.isdigit() else "math.operator", f"{token_id}:{i}", size, token_id) for i, c in enumerate(clusters(expr["value"]))])
+            letters=clusters(expr["value"])
+            selected_metrics=[]
+            return join([self._run_glyph(letters,i,"math.digit" if c.isdigit() else "math.operator",
+                                        token_id,size,selected_metrics,whole_run=True,position=.5)
+                         for i,c in enumerate(letters)])
         if typ == "row":
             return join([self.math(item, f"{token_id}.items[{i}]", size) for i, item in enumerate(expr["items"])], 0.22 * size)
         if typ == "relation":

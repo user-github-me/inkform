@@ -17,6 +17,10 @@ SCRIPT_CONTEXTS = {"superscript", "subscript"}
 NORMALIZATIONS = {"body_xheight", "context_xheight"}
 PREFERRED_HEIGHT_RATIO_BOUNDS = (.72, 1.5)
 CLEAR_HEIGHT_RATIO_BOUNDS = (.65, 1.8)
+# Comparable adjacent ink must fit in both reading directions. The bank
+# bounds remain asymmetric because a bank median is not another occurrence.
+NEIGHBOR_HEIGHT_RATIO_BOUNDS = (max(CLEAR_HEIGHT_RATIO_BOUNDS[0], 1/CLEAR_HEIGHT_RATIO_BOUNDS[1]),
+                              min(CLEAR_HEIGHT_RATIO_BOUNDS[1], 1/CLEAR_HEIGHT_RATIO_BOUNDS[0]))
 LATIN_CAPITALS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 BODY_LETTERS = frozenset("acegijmnopqrsuvwxyz")
 ASCENDER_LETTERS = frozenset("bdfhklt")
@@ -150,7 +154,7 @@ def instance_scale_metric(item):
         height=_upper_extent(item,baseline,size)
     if height is None:
         return None
-    return {"text":item["text"],"anatomy":category,"height_mm":height,"height_xheight":height/size}
+    return {"token_id":item.get("token_id"),"text":item["text"],"anatomy":category,"height_mm":height,"height_xheight":height/size}
 
 
 def _strong_reference(category, basis, count):
@@ -165,13 +169,29 @@ def audit_context_sizes(instances, *, tolerance_mm=.0002):
     result={"version":"inkform-context-size-audit-1","tolerance_mm":tolerance_mm,"checked_glyph_count":0,
             "without_comparable_reference":0,"marks_and_symbols_skipped":0,
             "errors":[],"warnings":[]}
+    metrics={item.get("token_id"):instance_scale_metric(item) for item in instances}
     for item in instances:
-        metric=instance_scale_metric(item)
+        metric=metrics[item.get("token_id")]
         if metric is None:
             result["marks_and_symbols_skipped"]+=1
             continue
         context=item.get("variation",{}).get("context_selection",{})
         reference=context.get("height_reference_xheight")
+        neighbor_reference=context.get("selected_neighbor_clear_height_reference_xheight")
+        neighbor_tokens=context.get("selected_neighbor_token_ids",[])
+        if neighbor_tokens:
+            neighbors={}
+            for token in neighbor_tokens:
+                neighbor=metrics.get(token)
+                if neighbor is not None:
+                    neighbors.setdefault(neighbor["text"],[]).append(neighbor["height_xheight"])
+            if any(metrics.get(token) is None for token in neighbor_tokens):
+                result["errors"].append({"code":"missing_selected_neighbor_ink","token_id":item.get("token_id"),
+                                         "neighbor_token_ids":neighbor_tokens})
+                continue
+            neighbor_reference=median(median(values) for values in neighbors.values())
+            if context.get("height_reference_basis")=="selected_neighbor_median":
+                reference=neighbor_reference
         if not reference:
             result["without_comparable_reference"]+=1
             continue
@@ -190,6 +210,15 @@ def audit_context_sizes(instances, *, tolerance_mm=.0002):
             if not low-epsilon <= clear_ratio <= high+epsilon:
                 result["errors"].append({**record,"code":"placed_ink_context_size_mismatch",
                                          "clear_height_ratio":clear_ratio})
+                continue
+        if neighbor_reference:
+            neighbor_ratio=metric["height_xheight"]/neighbor_reference
+            low,high=context["selected_neighbor_clear_height_ratio_bounds"]
+            epsilon=tolerance_mm/(neighbor_reference*item["nominal_size_mm"])
+            if not low-epsilon <= neighbor_ratio <= high+epsilon:
+                result["errors"].append({**record,"code":"placed_ink_selected_neighbor_size_mismatch",
+                                         "selected_neighbor_height_ratio":neighbor_ratio,
+                                         "selected_neighbor_reference_height_mm":neighbor_reference*item["nominal_size_mm"]})
                 continue
         low,high=context.get("height_ratio_bounds",PREFERRED_HEIGHT_RATIO_BOUNDS)
         epsilon=tolerance_mm/(reference*item["nominal_size_mm"])
@@ -233,8 +262,7 @@ class VariantContext:
         reference_category = "ascender" if category=="ascender" or (category=="capital" and text in LATIN_CAPITALS) else category
         selected_neighbors={}
         for item in neighbor_metrics or []:
-            if (item["anatomy"]==reference_category and item["text"]!=text
-                    and (reference_category!="ascender" or item["text"] in ASCENDER_REFERENCES)):
+            if self._comparable_neighbor(text,category,reference_category,item):
                 selected_neighbors.setdefault(item["text"],[]).append(item["height_xheight"])
         if selected_neighbors:
             return median(median(values) for values in selected_neighbors.values()), "selected_neighbor_median", len(selected_neighbors)
@@ -257,6 +285,41 @@ class VariantContext:
         if len(heights) >= 3:
             return median(heights), "same_character_median", len(heights)
         return None, "insufficient_comparable_geometry", len(heights)
+
+    def _credible_neighbor(self, item):
+        natural="body" if item["anatomy"] in {"body_xheight","ascender"} else item["anatomy"]
+        reference,basis,count=self._reference([],item["text"],natural)
+        if reference is None or not _strong_reference(item["anatomy"],basis,count):
+            return False
+        low,high=CLEAR_HEIGHT_RATIO_BOUNDS
+        return low*reference <= item["height_xheight"] <= high*reference
+
+    def _comparable_neighbor(self, text, category, expected, item):
+        if item["text"]==text:
+            # Repeated f/t/capitals can compare to their own anatomy even
+            # though they do not establish the general ascender scale. An
+            # independent bank reference must first validate that occurrence.
+            return item["anatomy"]==category and self._credible_neighbor(item)
+        return (item["anatomy"]==expected
+                and (expected!="ascender" or item["text"] in ASCENDER_REFERENCES))
+
+    def _verified_neighbor_reference(self, text, natural, neighbor_metrics):
+        """Use selected neighbors only when their own bank scale is credible."""
+        category=anatomy_context(text,natural)
+        expected="ascender" if category=="ascender" or (category=="capital" and text in LATIN_CAPITALS) else category
+        values={}
+        tokens=[]
+        for item in neighbor_metrics or []:
+            label=item["text"]
+            if not self._comparable_neighbor(text,category,expected,item):
+                continue
+            if self._credible_neighbor(item):
+                values.setdefault(label,[]).append(item["height_xheight"])
+                if item.get("token_id") is not None:
+                    tokens.append(item["token_id"])
+        if values:
+            return median(median(heights) for heights in values.values()),len(values),tokens
+        return None,0,[]
 
     def eligible(self, forms, text, role, requested=None, *, neighbors=None, neighbor_metrics=None, local_context=None, size=None):
         natural = natural_context(text,role)
@@ -326,6 +389,13 @@ class VariantContext:
                     clear_candidates=[g for g in compatible if self.scale_heights.get(g["glyph_id"]) is not None
                                       and low*clear_reference <= self.scale_heights[g["glyph_id"]] <= high*clear_reference]
                     acceptable=[g for g in acceptable if g in clear_candidates]
+                neighbor_reference,neighbor_count,neighbor_tokens=self._verified_neighbor_reference(text,natural,neighbor_metrics)
+                neighbor_candidates=compatible
+                if neighbor_reference is not None:
+                    low,high=NEIGHBOR_HEIGHT_RATIO_BOUNDS
+                    neighbor_candidates=[g for g in compatible if self.scale_heights.get(g["glyph_id"]) is not None
+                                         and low*neighbor_reference <= self.scale_heights[g["glyph_id"]] <= high*neighbor_reference]
+                    acceptable=[g for g in acceptable if g in neighbor_candidates]
                 diagnostic.update(height_reference_xheight=reference,height_reference_basis=basis,
                                   height_reference_count=count,height_ratio_bounds=list(PREFERRED_HEIGHT_RATIO_BOUNDS))
                 if size is not None:
@@ -335,6 +405,12 @@ class VariantContext:
                                       clear_height_reference_xheight=clear_reference,
                                       clear_height_reference_basis=clear_basis,
                                       clear_height_reference_count=clear_count)
+                if neighbor_reference is not None:
+                    diagnostic.update(selected_neighbor_clear_height_reference_xheight=neighbor_reference,
+                                      selected_neighbor_clear_height_reference_count=neighbor_count,
+                                      selected_neighbor_clear_height_ratio_bounds=list(NEIGHBOR_HEIGHT_RATIO_BOUNDS))
+                    if neighbor_tokens:
+                        diagnostic["selected_neighbor_token_ids"]=neighbor_tokens
                 selected=acceptable
                 reason="estimated_height_incompatible"
                 if not acceptable:
@@ -346,6 +422,14 @@ class VariantContext:
                     if clear_supported:
                         selected=clear_candidates
                         reason="estimated_height_clearly_incompatible"
+                    if neighbor_reference is not None:
+                        selected=[g for g in selected if g in neighbor_candidates]
+                        if selected:
+                            distances={g["glyph_id"]:abs(math.log(self.scale_heights[g["glyph_id"]]/neighbor_reference))
+                                       for g in selected}
+                            nearest=min(distances.values())
+                            selected=[g for g in selected if distances[g["glyph_id"]]<=nearest+1e-7]
+                            diagnostic["fallback_preference"]="closest_actual_neighbor_height"
                     if selected:
                         diagnostic["fallback"]="no_candidate_in_preferred_height_range; preserve source forms within the available evidence"
                         diagnostic["warnings"]=[{"code":"estimated_height_outside_preferred_range",
@@ -357,6 +441,10 @@ class VariantContext:
                     if glyph not in selected:
                         entry={"glyph_id":glyph["glyph_id"],"reason":reason,
                                "height_xheight":self.scale_heights.get(glyph["glyph_id"])}
+                        if not acceptable and glyph in clear_candidates and glyph not in neighbor_candidates:
+                            entry["reason"]="estimated_height_clearly_incompatible_with_selected_neighbor"
+                        elif not acceptable and glyph in clear_candidates and glyph in neighbor_candidates and neighbor_reference is not None:
+                            entry["reason"]="farther_from_selected_neighbor_height"
                         annotation=annotations[glyph["glyph_id"]]
                         if annotation:
                             entry["source_context"]=annotation["kind"]

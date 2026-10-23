@@ -234,6 +234,85 @@ def test_actual_selected_neighbors_keep_body_sizes_coherent(profile):
         assert second["variation"]["context_selection"]["height_reference_basis"]=="selected_neighbor_median"
 
 
+@pytest.mark.parametrize("text",["a","f","t","H"])
+def test_repeated_character_uses_independently_credible_previous_ink(profile,text):
+    shape=writer(profile)
+    natural="capital" if text.isupper() else "body"
+    forms=shape.forms[("text",text)]
+    reference,_,_=shape.variant_context._reference(forms,text,natural)
+    original=shape.variant_context.scale_heights[forms[0]["glyph_id"]]
+    forms=[donor(profile,text,"text",ratio*reference/original,f"{text}-{ratio}") for ratio in (.74,1.4)]
+    profile["glyphs"]=[g for g in profile["glyphs"] if (g["role"],g["text"])!=("text",text) or g in forms]
+    shape=writer(profile)
+    for index in range(6):
+        first,second=shape.text(text*2,"text",f"repeated-{index}").items
+        ratio=instance_scale_metric(second)["height_mm"]/instance_scale_metric(first)["height_mm"]
+        assert .65 <= ratio <= 1/.65
+        context=second["variation"]["context_selection"]
+        assert context["height_reference_basis"]=="selected_neighbor_median"
+        assert context["selected_neighbor_token_ids"]==[first["token_id"]]
+        assert context["local_context"]["word_initial"] is False
+        assert first["text"]==second["text"]==text
+        assert audit_context_sizes([first,second])["errors"]==[]
+
+
+def test_repeated_character_alone_cannot_establish_its_own_bank_scale(profile):
+    only=donor(profile,"H","text",.4,"isolated-small-capital")
+    profile["glyphs"]=[only]
+    first,second=writer(profile).text("HH","text","sparse").items
+    context=second["variation"]["context_selection"]
+    assert context["fallback"].startswith("insufficient_comparable_geometry")
+    assert "selected_neighbor_token_ids" not in context
+    assert first["glyph_id"]==second["glyph_id"]==only["glyph_id"]
+
+
+@pytest.mark.parametrize("word",["ac","ca"])
+def test_comparable_neighbor_limits_apply_in_both_reading_directions(profile,word):
+    shape=writer(profile)
+    for text,height in (("a",.68),("c",1.2)):
+        original=shape.forms[("text",text)][0]
+        glyph=donor(profile,text,"text",height/shape.variant_context.scale_heights[original["glyph_id"]],"only-"+text)
+        profile["glyphs"]=[g for g in profile["glyphs"] if (g["role"],g["text"])!=("text",text) or g is glyph]
+    with pytest.raises(InkformError) as error:
+        writer(profile).text(word,"text","asymmetric-pair")
+    assert error.value.code=="missing_context_compatible_glyph"
+    context=error.value.details["context_selection"]
+    assert context["selected_neighbor_clear_height_ratio_bounds"]==pytest.approx([.65,1/.65])
+    assert context["clear_height_ratio_bounds"]==[.65,1.8]
+
+
+@pytest.mark.parametrize("word",["aa","ac"])
+def test_pdf_audit_checks_repeated_and_reciprocal_neighbor_ink(profile,tmp_path,word):
+    import hashlib
+    from inkform.document import literal_document
+    from inkform.layout import plan_document
+    from inkform.rendering import export_pdf
+    from inkform.validation import check_pdf
+    shape=writer(profile)
+    for text,height in (("a",.74),("c",.97)):
+        original=shape.forms[("text",text)][0]
+        glyph=donor(profile,text,"text",height/shape.variant_context.scale_heights[original["glyph_id"]],"only-"+text)
+        profile["glyphs"]=[g for g in profile["glyphs"] if (g["role"],g["text"])!=("text",text) or g is glyph]
+    plan=plan_document(literal_document(word),profile)
+    changed=copy.deepcopy(plan)
+    second=changed["instances"][1]
+    baseline=second["baseline_y_mm"]
+    # 1.3 remains within the independent bank band, but is visibly too tall
+    # beside .74: only a reciprocal/repeated-letter neighbor check catches it.
+    scale=1.3/instance_scale_metric(second)["height_xheight"]
+    second["strokes"]=map_strokes(second["strokes"],lambda x,y:(x,baseline+(y-baseline)*scale))
+    pdf=tmp_path/"changed-neighbor.pdf"
+    export_pdf(changed,profile,pdf,"changed neighbor")
+    plan["pdf_sha256"]=hashlib.sha256(pdf.read_bytes()).hexdigest()
+    report=check_pdf(pdf,plan,preview_dpi=36)
+    assert report["checks"]["context_sizes"]=="fail"
+    assert plan["context_size_audit"]["errors"]==[]
+    error=report["context_size_audit"]["errors"][0]
+    assert error["token_id"]==second["token_id"]
+    assert error["code"]=="placed_ink_selected_neighbor_size_mismatch"
+    assert error["selected_neighbor_height_ratio"]==pytest.approx(1.3/.74,abs=.0001)
+
+
 def test_small_neighbor_cannot_override_clear_independent_digit_scale(profile):
     small=donor(profile,scale=.5,name="only-tiny-six")
     profile["glyphs"]=[g for g in profile["glyphs"] if g["text"]!="6" or g is small]
@@ -245,6 +324,125 @@ def test_small_neighbor_cannot_override_clear_independent_digit_scale(profile):
     assert diagnostic["height_reference_basis"]=="selected_neighbor_median"
     assert diagnostic["clear_height_reference_basis"]=="peer_character_median"
     assert diagnostic["eligible_count"]==0
+
+
+def number_38_bank(profile,eight_heights,role="text"):
+    # Authored geometry recreates the emitted assignment's relative heights;
+    # no private source contours or names are copied into the regression.
+    for glyph in profile["glyphs"]:
+        if len(glyph["text"])==1 and glyph["text"].isdecimal():
+            height=1.302 if glyph["text"]=="3" else 1.16
+            bounds=geometry_bounds(glyph["strokes"])
+            scale=height/(bounds[3]-bounds[1])
+            glyph["strokes"]=map_strokes(glyph["strokes"],lambda x,y:(x*scale,y*scale))
+            glyph["ink_bounds"]=geometry_bounds(glyph["strokes"])
+    forms=[donor(profile,"8",role,height/1.16,f"eight-{index}") for index,height in enumerate(eight_heights)]
+    profile["glyphs"]=[g for g in profile["glyphs"] if (g["text"],g["role"])!=("8",role) or g in forms]
+    return forms
+
+
+@pytest.mark.parametrize("context",[None,"superscript","subscript"])
+@pytest.mark.parametrize("eight_heights",[(.818,),(.818,.854)])
+def test_math_numbers_check_actual_neighbors_before_emission_and_scale_scripts_once(profile,context,eight_heights):
+    forms=number_38_bank(profile,eight_heights,role="math.digit")
+    expression={"type":"number","value":"38"}
+    if context:
+        expression={"type":context,"base":{"type":"symbol","value":"x"},"script":expression}
+    shape=writer(profile)
+    if len(forms)==1:
+        with pytest.raises(InkformError) as error:
+            shape.math(expression,"number")
+        assert error.value.code=="missing_context_compatible_glyph"
+        assert error.value.details["context_selection"]["eligible_count"]==0
+        return
+    box=shape.math(expression,"number")
+    three,eight=[item for item in box.items if item["role"]=="math.digit"]
+    assert eight["glyph_id"]==forms[1]["glyph_id"]
+    assert [three["text"],eight["text"]]==["3","8"]
+    assert three["nominal_size_mm"]==eight["nominal_size_mm"]==pytest.approx(shape.size*(.68 if context else 1))
+    assert instance_scale_metric(three)["height_xheight"]==pytest.approx(1.302)
+    assert instance_scale_metric(eight)["height_xheight"]==pytest.approx(.854)
+    diagnostic=eight["variation"]["context_selection"]
+    assert diagnostic["requested"]==(context or "baseline_digit")
+    assert diagnostic["selected_neighbor_token_ids"]==[three["token_id"]]
+    assert audit_context_sizes(box.items)["errors"]==[]
+
+
+def test_number_decimal_retains_operator_role_and_digit_neighbor_context(profile):
+    forms=number_38_bank(profile,(.818,.854),role="math.digit")
+    items=writer(profile).math({"type":"number","value":"3.8"},"decimal").items
+    assert [item["text"] for item in items]==["3",".","8"]
+    assert [item["role"] for item in items]==["math.digit","math.operator","math.digit"]
+    assert [item["token_id"] for item in items]==["decimal:0","decimal:1","decimal:2"]
+    assert items[2]["glyph_id"]==forms[1]["glyph_id"]
+    assert items[2]["variation"]["context_selection"]["selected_neighbor_token_ids"]==["decimal:0"]
+
+
+def test_fallback_uses_larger_eight_that_fits_actual_three_before_source_balancing(profile):
+    small,larger=number_38_bank(profile,(.818,.854))
+    shape=writer(profile)
+    for index in range(4):
+        three,eight=shape.text("38","text",f"number-{index}").items
+        assert eight["glyph_id"]==larger["glyph_id"]
+        context=eight["variation"]["context_selection"]
+        assert context["clear_height_reference_xheight"]==pytest.approx(1.16)
+        assert context["selected_neighbor_clear_height_reference_xheight"]==pytest.approx(1.302)
+        assert context["excluded"][0]["glyph_id"]==small["glyph_id"]
+        assert context["excluded"][0]["reason"]=="estimated_height_clearly_incompatible_with_selected_neighbor"
+        assert context["warnings"][0]["glyph_id"]==larger["glyph_id"]
+
+
+def test_fallback_reports_gap_when_no_eight_fits_an_independently_valid_three(profile):
+    number_38_bank(profile,(.818,))
+    with pytest.raises(InkformError) as error:
+        writer(profile).text("38","text","unusable-number")
+    assert error.value.code=="missing_context_compatible_glyph"
+    context=error.value.details["context_selection"]
+    assert context["selected_neighbor_clear_height_reference_xheight"]==pytest.approx(1.302)
+    assert context["clear_height_reference_xheight"]==pytest.approx(1.16)
+    assert context["eligible_count"]==0
+
+
+def test_marginal_local_fallback_chooses_closest_real_height_before_diversity(profile):
+    small,larger=number_38_bank(profile,(.818,.854))
+    two=next(g for g in profile["glyphs"] if (g["role"],g["text"])==("text","2"))
+    two["strokes"]=map_strokes(two["strokes"],lambda x,y:(x*1.198/1.16,y*1.198/1.16))
+    two["ink_bounds"]=geometry_bounds(two["strokes"])
+    shape=writer(profile)
+    for index in range(3):
+        _,eight=shape.text("28","text",f"marginal-{index}").items
+        assert eight["glyph_id"]==larger["glyph_id"]
+        context=eight["variation"]["context_selection"]
+        assert context["fallback_preference"]=="closest_actual_neighbor_height"
+        assert context["excluded"][0]["glyph_id"]==small["glyph_id"]
+        assert context["excluded"][0]["reason"]=="farther_from_selected_neighbor_height"
+        assert context["warnings"]
+
+
+@pytest.mark.parametrize("changed_digit",["3","8"])
+def test_pdf_audit_checks_actual_neighbor_band_even_when_bank_band_passes(profile,tmp_path,changed_digit):
+    import hashlib
+    from inkform.document import literal_document
+    from inkform.layout import plan_document
+    from inkform.rendering import export_pdf
+    from inkform.validation import check_pdf
+    number_38_bank(profile,(.818,.854))
+    plan=plan_document(literal_document("38"),profile)
+    changed=copy.deepcopy(plan)
+    digit=next(item for item in changed["instances"] if item["text"]==changed_digit)
+    baseline=digit["baseline_y_mm"]
+    factor=.818/.854 if changed_digit=="8" else 1.5/1.302
+    digit["strokes"]=map_strokes(digit["strokes"],lambda x,y:(x,baseline+(y-baseline)*factor))
+    pdf=tmp_path/"changed-digit.pdf"
+    export_pdf(changed,profile,pdf,"changed eight")
+    plan["pdf_sha256"]=hashlib.sha256(pdf.read_bytes()).hexdigest()
+    report=check_pdf(pdf,plan,preview_dpi=36)
+    assert report["checks"]["context_sizes"]=="fail"
+    error=report["context_size_audit"]["errors"][0]
+    assert error["text"]=="8"
+    assert error["code"]=="placed_ink_selected_neighbor_size_mismatch"
+    ratio=.818/1.302 if changed_digit=="8" else .854/1.5
+    assert error["selected_neighbor_height_ratio"]==pytest.approx(ratio,abs=.0001)
 
 
 def test_emitted_size_metrics_follow_baseline_translation(profile):
